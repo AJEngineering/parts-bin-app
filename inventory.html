@@ -100,6 +100,7 @@ select.sel{border:1px solid var(--rule);background:var(--card);padding:5px 8px;f
 .btn:hover{background:#000}
 .btn.ghost{background:none;color:var(--ink)}
 .btn.ghost:hover{background:var(--rule2)}
+a.btn{display:inline-block;text-decoration:none}   /* a link wearing a button */
 
 .rows{display:flex;flex-direction:column;gap:5px}
 .row{display:grid;grid-template-columns:56px 1fr auto;background:var(--card);
@@ -3172,6 +3173,11 @@ function viewAbout(){
          holds your stock, and the two are replaced independently. Nothing is uploaded anywhere else, there is no
          analytics of any kind, and the only outbound request the page ever makes is the one that reads a part off
          LCSC when you ask it to.</p>
+      <div class="sheetbar" style="margin-top:14px;flex-wrap:wrap">
+        <a class="btn" target="_blank" rel="noreferrer" href="${esc(REPO_URL)}">Source on GitHub</a>
+        <a class="btn ghost" target="_blank" rel="noreferrer" href="${esc(REPO_URL)}/releases/latest">Latest version</a>
+        <span class="pn" style="color:var(--ink3);font-size:12px">${esc(REPO_URL.replace("https://",""))}</span>
+      </div>
     </div>
     <div class="panel"><h2>What it is for</h2>
       <p>A drawer of components stops being searchable somewhere around the two-hundredth part. This keeps the
