@@ -1,0 +1,8 @@
+# The real inventory. The program is what lives here; the stock does not.
+components.json
+
+# Local editing leftovers
+inventory.backup-*.html
+*.bak
+.DS_Store
+Thumbs.db
