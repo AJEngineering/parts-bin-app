@@ -107,6 +107,11 @@ a.btn{display:inline-block;text-decoration:none}   /* a link wearing a button */
 .ord:hover{color:var(--kapton)}
 .ord[disabled]{opacity:.22;cursor:default}
 .ord[disabled]:hover{color:var(--ink3)}
+.grip{color:var(--ink3);cursor:grab;padding:0 2px;font-size:13px;line-height:1;user-select:none}
+tr[data-catrow]{cursor:grab}
+tr[data-catrow].dragging{opacity:.35}
+tr[data-catrow].dropabove td{box-shadow:inset 0 2px 0 var(--kapton)}
+tr[data-catrow].dropbelow td{box-shadow:inset 0 -2px 0 var(--kapton)}
 
 .rows{display:flex;flex-direction:column;gap:5px}
 .row{display:grid;grid-template-columns:56px 1fr auto;background:var(--card);
@@ -3131,7 +3136,8 @@ function viewData(){
       <p>A category is a label on a part — the old sheet tabs. Move its parts elsewhere and the delete link appears.</p>
       <p>The order below is the order they appear in everywhere else: the rail, the dropdown in the editor, and the
          parts list when it is sorted by category. Put the shelves you reach for most at the top — a bench is not
-         usually arranged alphabetically.</p>
+         usually arranged alphabetically. Drag a row to move it, or use the arrows for one step at a time; when the
+         list has grown long, the two buttons on the right are quicker than either.</p>
       <div class="sheetbar">
         <input id="newCatField" placeholder="New category name" style="border:1px solid var(--rule);background:var(--paper);padding:7px 9px;font-family:var(--mono);font-size:13px;border-radius:2px;flex:1;max-width:280px">
         <button class="btn" id="catAdd">Add category</button>
@@ -3153,8 +3159,9 @@ function viewData(){
             <input id="catRenameField" value="${esc(c)}" style="border:1px solid var(--kapton);background:#fff;padding:6px 8px;font-family:var(--mono);font-size:13px;flex:1;max-width:280px">
             <button class="btn" data-catsave="${esc(c)}">Save name</button>
             <button class="btn ghost" id="catCancel">Cancel</button></div></td></tr>`;
-        return `<tr><td style="white-space:nowrap">
-            <button class="ord" data-catup="${esc(c)}" title="move up"${i===0?" disabled":""}>&#9650;</button
+        return `<tr draggable="true" data-catrow="${esc(c)}"><td style="white-space:nowrap">
+            <span class="grip" title="drag to move">&#8942;&#8942;</span
+            ><button class="ord" data-catup="${esc(c)}" title="move up"${i===0?" disabled":""}>&#9650;</button
             ><button class="ord" data-catdn="${esc(c)}" title="move down"${i===db.categories.length-1?" disabled":""}>&#9660;</button>
           </td><td>${esc(c)}</td><td class="num m">${n}</td>
           <td style="text-align:right;white-space:nowrap">
@@ -3902,6 +3909,64 @@ document.addEventListener("click", async ev=>{
     return;
   }
 });
+
+/* ------------------------------------------- dragging a category about ---
+   The arrows are exact and reachable from a keyboard; a drag is quicker when
+   a shelf has to travel past a dozen others. Both write the same list, and
+   the two sort buttons handle the coarse arrangement, which is what a long
+   list actually needs - nobody drags the fiftieth row to the top.          */
+let catDrag = null;
+const catDropMarks = ()=> $$("tr[data-catrow]").forEach(x=>
+  x.classList.remove("dragging","dropabove","dropbelow"));
+
+/* where the row would land: above the one under the cursor, or below it */
+function catDropAt(ev){
+  const row = ev.target.closest && ev.target.closest("tr[data-catrow]");
+  if(!row || row.dataset.catrow===catDrag) return null;
+  const r = row.getBoundingClientRect();
+  return {row, below: ev.clientY > r.top + r.height/2};
+}
+
+document.addEventListener("dragstart", ev=>{
+  const row = ev.target.closest && ev.target.closest("tr[data-catrow]");
+  if(!row) return;
+  catDrag = row.dataset.catrow;
+  row.classList.add("dragging");
+  ev.dataTransfer.effectAllowed = "move";
+  /* Firefox refuses to start a drag unless the transfer carries something */
+  try{ ev.dataTransfer.setData("text/plain", catDrag); }catch(e){}
+});
+
+document.addEventListener("dragover", ev=>{
+  if(catDrag===null) return;
+  const at = catDropAt(ev);
+  if(!at) return;
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = "move";
+  $$("tr[data-catrow]").forEach(x=>x.classList.remove("dropabove","dropbelow"));
+  at.row.classList.add(at.below ? "dropbelow" : "dropabove");
+});
+
+document.addEventListener("drop", ev=>{
+  if(catDrag===null) return;
+  const at = catDropAt(ev);
+  if(!at) return;
+  ev.preventDefault();
+  const a = db.categories, moved = catDrag;
+  const from = a.indexOf(moved);
+  catDrag = null; catDropMarks();
+  if(from < 0) return;
+  const was = a.slice();
+  a.splice(from, 1);
+  const to = a.indexOf(at.row.dataset.catrow);
+  if(to < 0){ db.categories = was; return; }
+  a.splice(at.below ? to+1 : to, 0, moved);
+  if(a.join(" ")===was.join(" ")) return;   /* landed where it began */
+  save(); render();
+  toast(moved+" moved", "Undo", ()=>{ db.categories = was; save(); render(); });
+});
+
+document.addEventListener("dragend", ()=>{ catDrag = null; catDropMarks(); });
 
 document.addEventListener("input", ev=>{
   if(ev.target.classList && ev.target.classList.contains("calcin")){
