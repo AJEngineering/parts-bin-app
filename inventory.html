@@ -1329,8 +1329,11 @@ async function lcscFind(mpn){
   if(!renderers.length)
     throw new Error("searching by part number needs a relay that renders the page, and the built-in ones are switched off under Data");
   const text = await lcscTextFrom(LCSC_SEARCH+encodeURIComponent(mpn), 30000, renderers);
+  /* "0 results" is LCSC's search talking, and it is not to be believed: it
+     answers 0402WGF1002TCE with nothing at all, while the part sits in the
+     catalogue as C25744. Say what actually happened and let the person judge. */
   if(/\b0 results\b/i.test(text) && !/product-detail\/C\d+\.html/.test(text))
-    throw new Error("LCSC has nothing for "+mpn);
+    throw new Error("LCSC's own search found nothing for "+mpn+" — which it also does for parts it stocks, so this is not proof it has none");
   const codes = [];
   const rx = /product-detail\/(C\d+)\.html/g;
   let m;
@@ -3517,8 +3520,9 @@ async function lcscFindFill(){
     html += `<br><span style="color:var(--ink3)">Nothing has been written. Choosing one fills the code in, then fills the blanks the usual way.</span>`;
     note.innerHTML = html;
   }catch(e){
-    note.innerHTML = `<span class="bad">${esc(e.message)}.</span> ` +
-      `<a class="linkish" target="_blank" rel="noreferrer" href="${esc(LCSC_SEARCH)}${encodeURIComponent(mpn)}">Search lcsc.com by hand</a>.`;
+    note.innerHTML = `<span class="bad">${esc(e.message)}.</span><br>` +
+      `<a class="linkish" target="_blank" rel="noreferrer" href="${esc(LCSC_SEARCH)}${encodeURIComponent(mpn)}">Search lcsc.com by hand</a>` +
+      ` — and if you find it, put the code in the LCSC field and press <b>Fetch</b>, which never misses.`;
   } finally { btn.disabled = false; }
 }
 
