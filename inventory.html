@@ -329,7 +329,7 @@ let lastSaved = null;
 let fileStamp = null;       /* lastModified seen by this tab, detects outside edits */
 let ghTimer = null;
 let ghPushPending = false;  /* a debounced push is waiting to go out */
-const ui = { q:"", cat:"", box:"", low:false, sort:"cat", view:"parts", editCat:null, moveCat:null, mfr:"", bomText:"", bomQty:1, bomRows:null, order:null, calc:"ohm", calcVals:{}, bomName:"", rcvText:"", receive:null, lcscBulk:null };
+const ui = { q:"", cat:"", box:"", low:false, sort:"cat", view:"parts", editCat:null, moveCat:null, mfr:"", bomText:"", bomQty:1, bomRows:null, order:null, calc:"ohm", calcVals:{}, bomName:"", rcvText:"", receive:null, lcscBulk:null, lcscFinds:null };
 
 const $  = (s,r=document)=>r.querySelector(s);
 const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -984,9 +984,13 @@ const LCSC_API = "https://wmsc.lcsc.com/ftps/wm/product/detail?productCode=";
    answered when this was last checked - the first is a reader service that
    sends the header properly and wraps the page in an envelope, the other two
    hand the page back untouched and are up rather less of the time.         */
-const LCSC_PUBLIC = [["reader", "https://r.jina.ai/"],
-                     ["codetabs", "https://api.codetabs.com/v1/proxy?quest={url}"],
-                     ["allorigins", "https://api.allorigins.win/raw?url={url}"]];
+/* The third flag marks a relay that runs the page's JavaScript before
+   answering. It makes no difference to the part endpoint, which is plain
+   JSON, but the search page is built in the browser: a relay that only
+   forwards bytes hands back an empty shell with no results in it.         */
+const LCSC_PUBLIC = [["reader", "https://r.jina.ai/", true],
+                     ["codetabs", "https://api.codetabs.com/v1/proxy?quest={url}", false],
+                     ["allorigins", "https://api.allorigins.win/raw?url={url}", false]];
 let lcscVia = "";           /* which route answered last, for the Data panel */
 const lcsc = {relay:"", auto:true, public:true};
 function lcscLoad(){ try{ const t=localStorage.getItem(LCSC_KEY); if(t) Object.assign(lcsc, JSON.parse(t)); }catch(e){} }
@@ -1275,6 +1279,74 @@ function lcscBulkApply(){
     before.forEach(x=>Object.assign(x.p, x.was));
     save(); render();
   });
+}
+
+/* ------------------------------------------ finding a code from a part no -
+   Plenty of parts were entered with only a manufacturer part number. LCSC's
+   own search API sits behind a bot filter and answers 403 to anything that is
+   not their website, but the reader relay renders the search page, and the
+   codes are in the product-detail links on it.
+
+   That is a guess and must be treated as one. LCSC answers a part number it
+   does not carry with near neighbours, or with the whole category - searching
+   0603SAF8204T5E returns 0603WAF8204T5E, which is a different tolerance and
+   the wrong part to write into a bin. So every candidate is looked up
+   properly through the detail endpoint and its real part number compared with
+   the one asked for. Nothing is ever filled in from the guess alone.       */
+const LCSC_SEARCH = "https://www.lcsc.com/search?q=";
+const mpnKey = s => String(s||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+
+/* the same walk as lcscFetch, but for any address, and it hands back text.
+   `routes` is passed in because the search needs the rendering relays only -
+   going straight at LCSC returns the page's empty shell, and returns it fast,
+   which would look like success and find nothing.                          */
+async function lcscTextFrom(url, ms, routes){
+  routes = routes || [["direct",""]]
+    .concat(lcsc.relay?[["your relay", lcsc.relay]]:[])
+    .concat(lcsc.public?LCSC_PUBLIC:[]);
+  const failed = [];
+  for(const [name,tpl] of routes){
+    const ctl = new AbortController();
+    const timer = setTimeout(()=>ctl.abort(), ms||25000);
+    try{
+      const r = await fetch(lcscRoute(tpl, url), {signal:ctl.signal, headers:{Accept:"application/json"}});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      const body = await r.text();
+      /* a reader relay wraps the page; anything else hands it over as it is */
+      let d = null; try{ d = JSON.parse(body); }catch(e){}
+      if(d && d.data && typeof d.data.content==="string") return d.data.content;
+      if(d && typeof d.contents==="string") return d.contents;
+      return body;
+    }catch(e){
+      failed.push(name+" "+(e.name==="AbortError" ? "timed out" : e.message));
+    } finally { clearTimeout(timer); }
+  }
+  throw new Error("no route worked — "+failed.join("; "));
+}
+
+async function lcscFind(mpn){
+  const renderers = (lcsc.public?LCSC_PUBLIC:[]).filter(r=>r[2]);
+  if(!renderers.length)
+    throw new Error("searching by part number needs a relay that renders the page, and the built-in ones are switched off under Data");
+  const text = await lcscTextFrom(LCSC_SEARCH+encodeURIComponent(mpn), 30000, renderers);
+  if(/\b0 results\b/i.test(text) && !/product-detail\/C\d+\.html/.test(text))
+    throw new Error("LCSC has nothing for "+mpn);
+  const codes = [];
+  const rx = /product-detail\/(C\d+)\.html/g;
+  let m;
+  while((m = rx.exec(text)) !== null && codes.length < 4)
+    if(codes.indexOf(m[1])<0) codes.push(m[1]);
+  if(!codes.length) throw new Error("nothing on that page looked like a part");
+  const want = mpnKey(mpn), out = [];
+  for(const c of codes){
+    try{
+      const r = await lcscFetch(c);
+      out.push({code:c, r, exact: mpnKey(r.productModel)===want});
+    }catch(e){}
+  }
+  if(!out.length) throw new Error("the codes on that page could not be read back");
+  out.sort((a,b)=>(b.exact?1:0)-(a.exact?1:0));
+  return out;
 }
 
 function lcscPrice(r){
@@ -3278,7 +3350,10 @@ function openEditor(p, seed){
   $("#overlay").innerHTML = `<form class="sheet" id="sheet" data-new="${isNew?1:0}" data-opencat="${esc(d.cat||"")}">
     <h2>${isNew?"Add part":"Edit part"}</h2>
     <div class="form">
-      <div class="f wide"><label class="lab">Manufacturer part number</label><input name="mpn" value="${esc(d.mpn)}" required></div>
+      <div class="f wide"><label class="lab">Manufacturer part number</label>
+        <div class="lcscrow"><input name="mpn" value="${esc(d.mpn)}" required>
+          <button class="btn ghost" type="button" id="lcscFind"
+                  title="Search LCSC for this part number and find its code">Find code</button></div></div>
       <div class="f"><label class="lab">LCSC</label>
         <div class="lcscrow"><input name="lcsc" value="${esc(d.lcsc)}" placeholder="C1779">
           <button class="btn ghost" type="button" id="lcscGet" title="Read the rest of this part off LCSC">Fetch</button></div>
@@ -3363,7 +3438,18 @@ function openEditor(p, seed){
     const code = lcscCode(lc.value);
     if(lcsc.auto && code && code!==lc.dataset.done) lcscFill();
   });
+  $("#lcscFind").onclick = ()=>lcscFindFill();
   $("#lcscNote").addEventListener("click", ev=>{
+    /* a candidate from a part-number search: take its code, then fill as usual */
+    const pick = ev.target.closest("[data-pick]");
+    if(pick){
+      const hit = (ui.lcscFinds||[]).find(x=>x.code===pick.dataset.pick);
+      if(!hit) return;
+      const form = $("#sheet"), lc = form.elements.lcsc;
+      lc.value = hit.code; lc.dataset.done = hit.code; lc.classList.add("fresh");
+      lcscApply(hit.r, form, $("#lcscNote"));
+      return;
+    }
     const b = ev.target.closest(".take");
     if(!b) return;
     const el = $("#sheet").elements[b.dataset.k];
@@ -3400,6 +3486,39 @@ async function lcscFill(){
     note.innerHTML = `<span class="bad">${esc(e.message)}.</span> ` +
       `<a class="linkish" target="_blank" rel="noreferrer" href="${esc(lcscPage(code))}">Look ${esc(code)} up by hand</a>` +
       `, or set a relay under <b>Data → Filling a part in from LCSC</b>.`;
+  } finally { btn.disabled = false; }
+}
+
+/* Searching by part number takes seconds, not the fraction the code lookup
+   takes, and it can come back with something that merely resembles the part.
+   So it never writes: it lists what it found, says plainly which ones carry
+   the part number asked for and which do not, and waits to be told.        */
+async function lcscFindFill(){
+  const form = $("#sheet"); if(!form) return;
+  const mpn = String(form.elements.mpn.value||"").trim();
+  const note = $("#lcscNote"), btn = $("#lcscFind");
+  if(!mpn){ note.innerHTML = `<span class="bad">Type a manufacturer part number first.</span>`; return; }
+  if(lcscCode(form.elements.lcsc.value)){
+    note.innerHTML = `This part already has an LCSC code — press <b>Fetch</b> beside it instead, which is quicker and exact.`;
+    return;
+  }
+  note.innerHTML = `Searching LCSC for <b>${esc(mpn)}</b>… this takes a few seconds.`;
+  btn.disabled = true;
+  try{
+    const finds = await lcscFind(mpn);
+    ui.lcscFinds = finds;
+    const exact = finds.filter(f=>f.exact), other = finds.filter(f=>!f.exact);
+    const row = f => `<button type="button" class="take" data-pick="${esc(f.code)}">
+        <b>${esc(f.code)}</b> <em>${esc(f.r.productModel||"")}</em>
+        ${esc([f.r.brandNameEn, f.r.encapStandard].filter(Boolean).join(" · "))}</button>`;
+    let html = "";
+    if(exact.length) html += `<b>Same part number:</b><br>${exact.map(row).join("")}`;
+    if(other.length) html += `${exact.length?"<br>":""}<span class="bad">Different part number — check before taking:</span><br>${other.map(row).join("")}`;
+    html += `<br><span style="color:var(--ink3)">Nothing has been written. Choosing one fills the code in, then fills the blanks the usual way.</span>`;
+    note.innerHTML = html;
+  }catch(e){
+    note.innerHTML = `<span class="bad">${esc(e.message)}.</span> ` +
+      `<a class="linkish" target="_blank" rel="noreferrer" href="${esc(LCSC_SEARCH)}${encodeURIComponent(mpn)}">Search lcsc.com by hand</a>.`;
   } finally { btn.disabled = false; }
 }
 
