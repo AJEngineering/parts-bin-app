@@ -102,6 +102,12 @@ select.sel{border:1px solid var(--rule);background:var(--card);padding:5px 8px;f
 .btn.ghost:hover{background:var(--rule2)}
 a.btn{display:inline-block;text-decoration:none}   /* a link wearing a button */
 
+/* ---------- moving a category up or down its list ---------- */
+.ord{font-family:var(--mono);font-size:14px;color:var(--ink3);padding:0 4px;line-height:1}
+.ord:hover{color:var(--kapton)}
+.ord[disabled]{opacity:.22;cursor:default}
+.ord[disabled]:hover{color:var(--ink3)}
+
 .rows{display:flex;flex-direction:column;gap:5px}
 .row{display:grid;grid-template-columns:56px 1fr auto;background:var(--card);
      border:1px solid var(--rule);border-radius:2px}
@@ -689,12 +695,17 @@ function filtered(queryOnly){
     if(terms.length) return terms.every(t=>matches(p,t));
     return true;
   });
+  /* Sorting by category follows the order the categories are kept in, not the
+     alphabet - that order is the one arranged under Data, and a bench rarely
+     wants its shelves alphabetised. Anything not on the list sinks.         */
+  const rank = new Map(db.categories.map((c,i)=>[c,i]));
+  const cr = c => rank.has(c) ? rank.get(c) : 1e6;
   const by = {
-    cat:(a,b)=> a.cat.localeCompare(b.cat) || (a.mpn||"").localeCompare(b.mpn||""),
+    cat:(a,b)=> cr(a.cat)-cr(b.cat) || (a.mpn||"").localeCompare(b.mpn||""),
     qty:(a,b)=> (a.qty||0)-(b.qty||0),
     qtyd:(a,b)=> (b.qty||0)-(a.qty||0),
     box:(a,b)=>{ const A=partBoxes(a)[0],B=partBoxes(b)[0];
-                 return (A?A.n:999)-(B?B.n:999) || a.cat.localeCompare(b.cat); },
+                 return (A?A.n:999)-(B?B.n:999) || cr(a.cat)-cr(b.cat); },
     mpn:(a,b)=> (a.mpn||"").localeCompare(b.mpn||"")
   };
   return list.sort(by[ui.sort]||by.cat);
@@ -3118,25 +3129,34 @@ function viewData(){
     </div>
     <div class="panel"><h2>Categories</h2>
       <p>A category is a label on a part — the old sheet tabs. Move its parts elsewhere and the delete link appears.</p>
+      <p>The order below is the order they appear in everywhere else: the rail, the dropdown in the editor, and the
+         parts list when it is sorted by category. Put the shelves you reach for most at the top — a bench is not
+         usually arranged alphabetically.</p>
       <div class="sheetbar">
         <input id="newCatField" placeholder="New category name" style="border:1px solid var(--rule);background:var(--paper);padding:7px 9px;font-family:var(--mono);font-size:13px;border-radius:2px;flex:1;max-width:280px">
         <button class="btn" id="catAdd">Add category</button>
+        <span class="grow"></span>
+        ${db.categories.length>1?`<button class="btn ghost" id="catSortAz">Sort A to Z</button>
+          <button class="btn ghost" id="catSortUse" title="most parts first">Sort by how full they are</button>`:""}
       </div>
-      <table style="margin-top:12px"><thead><tr><th>Category</th><th class="num">Parts</th><th></th></tr></thead><tbody>
-      ${db.categories.map(c=>{
+      <table style="margin-top:12px"><thead><tr><th style="width:1%"></th><th>Category</th><th class="num">Parts</th><th></th></tr></thead><tbody>
+      ${db.categories.map((c,i)=>{
         const n = db.parts.filter(p=>p.cat===c).length;
-        if(ui.moveCat===c) return `<tr><td colspan="3">
+        if(ui.moveCat===c) return `<tr><td colspan="4">
           <div class="sheetbar" style="margin:0">
             <span class="lab">Move ${n} parts to</span>
             <select class="sel" id="moveTarget">${db.categories.filter(x=>x!==c).map(x=>`<option>${esc(x)}</option>`).join("")}</select>
             <button class="btn" data-catmove="${esc(c)}">Move them</button>
             <button class="btn ghost" id="catCancel">Cancel</button></div></td></tr>`;
-        if(ui.editCat===c) return `<tr><td colspan="3">
+        if(ui.editCat===c) return `<tr><td colspan="4">
           <div class="sheetbar" style="margin:0">
             <input id="catRenameField" value="${esc(c)}" style="border:1px solid var(--kapton);background:#fff;padding:6px 8px;font-family:var(--mono);font-size:13px;flex:1;max-width:280px">
             <button class="btn" data-catsave="${esc(c)}">Save name</button>
             <button class="btn ghost" id="catCancel">Cancel</button></div></td></tr>`;
-        return `<tr><td>${esc(c)}</td><td class="num m">${n}</td>
+        return `<tr><td style="white-space:nowrap">
+            <button class="ord" data-catup="${esc(c)}" title="move up"${i===0?" disabled":""}>&#9650;</button
+            ><button class="ord" data-catdn="${esc(c)}" title="move down"${i===db.categories.length-1?" disabled":""}>&#9660;</button>
+          </td><td>${esc(c)}</td><td class="num m">${n}</td>
           <td style="text-align:right;white-space:nowrap">
             <button class="linkish" data-catren="${esc(c)}">rename</button>
             ${n?` · <button class="linkish" data-catmoveask="${esc(c)}">move parts out</button>`
@@ -3805,6 +3825,29 @@ document.addEventListener("click", async ev=>{
     render(); toast("This computer is now "+device);
     return;
   }
+  /* moving a category up or down the list it is kept in */
+  const cUp = t.closest("[data-catup]"), cDn = t.closest("[data-catdn]");
+  if(cUp || cDn){
+    const name = (cUp||cDn).dataset[cUp?"catup":"catdn"];
+    const a = db.categories, i = a.indexOf(name), j = i + (cUp?-1:1);
+    if(i<0 || j<0 || j>=a.length) return;
+    a[i] = a[j]; a[j] = name;
+    save(); render();
+    return;
+  }
+  if(t.id==="catSortAz" || t.id==="catSortUse"){
+    const was = db.categories.slice();
+    if(t.id==="catSortAz") db.categories.sort((x,y)=>x.localeCompare(y));
+    else {
+      const n = c => db.parts.filter(p=>p.cat===c).length;
+      db.categories.sort((x,y)=> n(y)-n(x) || x.localeCompare(y));
+    }
+    save(); render();
+    toast(t.id==="catSortAz"?"Categories sorted A to Z":"Fullest categories first", "Undo",
+      ()=>{ db.categories = was; save(); render(); });
+    return;
+  }
+
   if(t.id==="lcscBulkScan"){ t.disabled = true; await lcscBulkRead(); return; }
   if(t.id==="lcscBulkHalt"){ lcscBulkStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
   if(t.id==="lcscBulkApply"){ lcscBulkApply(); return; }
