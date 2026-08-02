@@ -98,20 +98,27 @@ LCSC lookup, adding a part is: paste code → Fetch → Save and add another.
 
 ### Sending a BOM to a board house
 
-After checking a BOM against the bin, **Send it to a fab** exports it in the shape PCBWay and
-NextPCB each ask for — PCBWay wants an item number, quantity, reference designator, part number,
-description, package and mounting type; NextPCB wants designator, quantity, description, footprint,
-manufacturer and part number. Same facts, different headings, so you get the right file for the
-house you are using.
+After checking a BOM against the bin, **Send it to a fab** exports it for **PCBWay**, **NextPCB**
+or **PCBGOGO**. The column headings are copied from each house's own template, so the file goes up
+without being rearranged first — NextPCB stars its required columns, PCBGOGO leads with the
+quantity and asks for a buying link, which is filled with the part's LCSC page.
 
 A fab sources from the manufacturer's part number, not a supplier code, so a line carrying only
 `C1779` is useless to them. **Fill N part numbers from LCSC** reads the missing ones off LCSC and
-writes them onto the lines first. Lines that matched something already on your shelf take the
-manufacturer and description from there.
+writes them onto the lines. Lines that matched something already on your shelf take the
+manufacturer and description from there. Anything still without a number — a connector LCSC has
+never heard of, a part from another supplier — gets a box under the buttons to type it into, and
+it goes into the file.
 
-Mounting type is only written where the package says so plainly — `0603` is SMD, `DIP-8` is
-through-hole, anything ambiguous is left blank rather than guessed, because an SMD part labelled
-through-hole costs a panel.
+Mounting type is only written where the package says so plainly. `TO-220` is through-hole and
+`TO-252` is not; `DO-41` is through-hole and `DO-214` is not; `Plugin` is LCSC's word for
+through-hole. Anything that does not say outright is left blank rather than guessed, because an
+SMD part labelled through-hole costs a panel.
+
+Footprints keep their leading zero. A spreadsheet treats `0402` as a number and hands back `402`,
+which tells a fab nothing — so a three-digit footprint that is really a chip size is padded back
+out, whether it arrives in a pasted BOM, gets typed into the editor, or is already sitting in your
+data file.
 
 ### Search
 

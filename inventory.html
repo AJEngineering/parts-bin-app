@@ -802,6 +802,15 @@ function normValue(v){
 }
 function normPkg(v){ return String(v||"").toUpperCase().replace(/[\s\-_]/g,""); }
 
+/* A spreadsheet treats 0402 as a number and hands back 402, and a fab reading
+   "402" has no idea what size to fit. Only pad when the padded form is a size
+   that actually exists, so anything else keeping three digits is left alone. */
+const PKG_PAD = new Set(["0201","0402","0603","0805","0505","0605"]);
+function padPkg(v){
+  const s = String(v||"").trim();
+  return (/^\d{3}$/.test(s) && PKG_PAD.has("0"+s)) ? "0"+s : s;
+}
+
 function splitLine(line){
   /* comma, semicolon or tab separated, quoted fields respected */
   const out = []; let cur = "", q = false;
@@ -844,7 +853,7 @@ function parseBom(text){
     let r;
     if(hasHeader){
       r = {mpn:c[map.mpn]||"", lcsc:c[map.lcsc]||"", val:c[map.val]||"",
-           pkg:c[map.pkg]||"", ref:c[map.ref]||"",
+           pkg:padPkg(c[map.pkg]), ref:c[map.ref]||"",
            need: map.qty!==undefined ? Number(String(c[map.qty]).replace(/[^\d.]/g,""))||0 : 0};
       if(!r.need && map.ref!==undefined) r.need = (r.ref.match(/[A-Z]+\d+/gi)||[]).length;
       if(!r.need) r.need = 1;
@@ -912,13 +921,23 @@ function runBom(){
    number. The same facts either way, under different headings - so each gets
    a file with the headings it asks for rather than one that half-suits both.
    Both take CSV.                                                            */
-const SMD_PKG = /^\d{3,4}$|SOT|SOD|SOP|QFN|QFP|SOIC|MSOP|TSSOP|DFN|BGA|LGA|SMD|CHIP|WSON|UDFN|CSP/i;
-const THT_PKG = /^(DIP|TO-?\d|RADIAL|AXIAL|THT|SIP|ZIP|PLCC|DO-?\d|HEADER)/i;
+/* four digits is an imperial or metric chip size; three is a size that lost
+   its leading zero, and padPkg has already fixed the ones that are real, so
+   whatever is still three digits is not something to guess about          */
+const SMD_PKG = /^\d{4}$|SOT|SOD|SOP|QFN|QFP|SOIC|MSOP|TSSOP|DFN|BGA|LGA|SMD|CHIP|WSON|UDFN|CSP|^SM[ABC]$|MELF/i;
+const THT_PKG = /^(DIP|RADIAL|AXIAL|THT|SIP|ZIP|HEADER)|PLUGIN|THROUGH.?HOLE/i;
+
 /* an SMD part called through-hole is a scrapped panel, so anything the
-   package does not say outright is left for a human to answer             */
+   package does not say outright is left for a human to answer. The TO and DO
+   families have to be read by their number, not their prefix: TO-220 is
+   through-hole and TO-252 is not, DO-41 is through-hole and DO-214 is not. */
 function bomMount(pkg){
   const p = String(pkg||"").trim();
   if(!p) return "";
+  if(/^TO-?(25[12]|26[1348]|236|243)/i.test(p)) return "SMD";
+  if(/^TO-?(3|18|39|92|126|220|221|247|264)/i.test(p)) return "THT";
+  if(/^DO-?21[345]/i.test(p)) return "SMD";
+  if(/^DO-?(15|27|34|35|41|20[14])/i.test(p)) return "THT";
   if(THT_PKG.test(p)) return "THT";
   if(SMD_PKG.test(p)) return "SMD";
   return "";
@@ -931,26 +950,41 @@ function bomOut(r){
           qty:  r.need || 0,
           mpn:  r.mpn || p.mpn || "",
           mfr:  r.mfr || p.mfr || "",
+          val:  r.val || p.val || "",
+          /* the houses that have no Value column still want it said somewhere */
           desc: r.desc || p.desc || r.val || p.val || "",
-          pkg:  r.pkg || p.pkg || "",
+          pkg:  padPkg(r.pkg || p.pkg),
           lcsc: (r.lcsc || p.lcsc || "").toUpperCase()};
 }
 
+/* the page a fab can buy the part from, which PCBGOGO asks for by name */
+const lcscLink = code => code ? "https://www.lcsc.com/product-detail/"+encodeURIComponent(code)+".html" : "";
+
+/* Headings copied from each house's own template, not from a description of
+   it: NextPCB marks its required columns with a star and PCBGOGO leads with
+   the quantity, and both are reproduced exactly as their sheets have them. */
+const BOM_FORMS = {
+  pcbway: {name:"PCBWay",
+    head:["Item","Quantity","Reference Designator","Manufacturer Part Number","Manufacturer",
+          "Description","Package","Type","Distributor Part Number"],
+    row:(o,i)=>[i+1, o.qty, o.ref, o.mpn, o.mfr, o.desc, o.pkg, bomMount(o.pkg), o.lcsc]},
+  nextpcb: {name:"NextPCB",
+    head:["Designator*","Quantity*","Manufacturer Part Number*","Manufacturer","Package/Footprint",
+          "Description","Procurement Type","Customer Note"],
+    row:o=>[o.ref, o.qty, o.mpn, o.mfr, o.pkg, o.desc, "", o.lcsc]},
+  pcbgogo: {name:"PCBGOGO",
+    head:["Quantity","Designator","Description","Value","Footprint","Manufacturer","Part Number",
+          "Buying Link as reference"],
+    row:o=>[o.qty, o.ref, o.desc, o.val, o.pkg, o.mfr, o.mpn, lcscLink(o.lcsc)]}
+};
+
 function bomCsv(vendor){
+  const form = BOM_FORMS[vendor] || BOM_FORMS.pcbway;
   const rows = (ui.bomRows||[]).map(bomOut);
   const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
-  let head, body;
-  if(vendor==="pcbway"){
-    head = ["Item","Quantity","Reference Designator","Manufacturer Part Number","Manufacturer",
-            "Description","Package","Type","Distributor Part Number"];
-    body = rows.map((o,i)=>[i+1, o.qty, o.ref, o.mpn, o.mfr, o.desc, o.pkg, bomMount(o.pkg), o.lcsc]);
-  } else {
-    head = ["Designator","Quantity","Manufacturer Part Number","Manufacturer",
-            "Description","Footprint","LCSC Part Number"];
-    body = rows.map(o=>[o.ref, o.qty, o.mpn, o.mfr, o.desc, o.pkg, o.lcsc]);
-  }
   /* the mark at the front is what makes Excel read UTF-8 rather than guess */
-  return "﻿" + [head.map(q).join(",")].concat(body.map(r=>r.map(q).join(","))).join("\r\n");
+  return "﻿" + [form.head.map(q).join(",")]
+    .concat(rows.map((o,i)=>form.row(o,i).map(q).join(","))).join("\r\n");
 }
 
 /* lines carrying only a supplier code: a fab cannot source from one, so the
@@ -3008,10 +3042,24 @@ function viewBom(){
       <div class="sheetbar" style="margin-top:10px;flex-wrap:wrap">
         <button class="btn ghost" id="bomFillMpn"${bomGaps().length?"":" disabled"}>Fill ${bomGaps().length} part numbers from LCSC</button>
         <span class="grow"></span>
-        <button class="btn" id="bomCsvPcbway">Export for PCBWay</button>
-        <button class="btn" id="bomCsvNextpcb">Export for NextPCB</button>
+        <button class="btn" id="bomCsvPcbway">PCBWay</button>
+        <button class="btn" id="bomCsvNextpcb">NextPCB</button>
+        <button class="btn" id="bomCsvPcbgogo">PCBGOGO</button>
       </div>
       <div id="bomWork"></div>
+      ${(()=>{
+        /* LCSC cannot know every part, and a line still without a number is
+           one the fab will write back about - so it can be typed in here */
+        const gaps = rows.map((r,i)=>({r,i})).filter(x=>!bomOut(x.r).mpn);
+        if(!gaps.length) return "";
+        return `<div style="margin-top:14px">
+          <div class="lab" style="margin-bottom:6px">${gaps.length} line${gaps.length>1?"s":""} still without a part number — type it in and it goes into the file</div>
+          ${gaps.map(({r,i})=>`<div class="sheetbar" style="margin:0 0 6px">
+            <span class="m" style="min-width:130px;font-size:12px;color:var(--ink2)">${esc(r.ref||r.val||r.lcsc||("line "+(i+1)))}</span>
+            <input class="bommpn" data-i="${i}" value="${esc(r.mpn||"")}" placeholder="manufacturer part number"
+              style="border:1px solid var(--rule);background:var(--paper);padding:6px 8px;font-family:var(--mono);font-size:12.5px;border-radius:2px;flex:1;max-width:320px">
+          </div>`).join("")}</div>`;
+      })()}
       <p style="color:var(--ink3);font-size:12px;margin-top:10px">Mounting type is written only where the package says
          it plainly — an SMD part labelled through-hole costs a panel, so anything unclear is left blank for you to answer.</p>
     </div>
@@ -3497,7 +3545,7 @@ function openEditor(p, seed){
       if(!db.categories.includes(cat)) db.categories.push(cat);
     }
     const rec = {cat:cat, lcsc:get("lcsc").toUpperCase(), mpn:get("mpn"), val:get("val"),
-                 pkg:get("pkg"), mfr:get("mfr"), box:get("box").toUpperCase(), desc:get("desc"), src:get("src"),
+                 pkg:padPkg(get("pkg")), mfr:get("mfr"), box:get("box").toUpperCase(), desc:get("desc"), src:get("src"),
                  qty:Number(f.get("qty")||0), min:get("min")===""?null:Number(f.get("min"))};
     if(isNew){
       rec.id = 1+db.parts.reduce((m,p)=>Math.max(m,p.id),0);
@@ -3747,10 +3795,10 @@ document.addEventListener("click", async ev=>{
 
   if(t.id==="bomFillMpn"){ t.disabled = true; await bomFillMpn(); return; }
   if(t.id==="bomFillHalt"){ bomFillStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
-  if(t.id==="bomCsvPcbway" || t.id==="bomCsvNextpcb"){
+  if(t.id==="bomCsvPcbway" || t.id==="bomCsvNextpcb" || t.id==="bomCsvPcbgogo"){
     const rows = ui.bomRows || [];
     if(!rows.length) return toast("Check a BOM against the bin first");
-    const vendor = t.id==="bomCsvPcbway" ? "pcbway" : "nextpcb";
+    const vendor = t.id==="bomCsvPcbway" ? "pcbway" : t.id==="bomCsvNextpcb" ? "nextpcb" : "pcbgogo";
     const name = (ui.bomName||"bom").trim().replace(/[^\w.-]+/g,"-").replace(/^-|-$/g,"") || "bom";
     download(name+"-"+vendor+".csv", bomCsv(vendor), "text/csv");
     const noPn = rows.filter(r=>!bomOut(r).mpn).length;
@@ -4222,6 +4270,12 @@ document.addEventListener("input", ev=>{
   if(ev.target.id==="bomName"){ ui.bomName = ev.target.value; return; }
   if(ev.target.id==="rcvText"){ ui.rcvText = ev.target.value; return; }
   if(ev.target.id==="bomQty"){  ui.bomQty  = Math.max(1, Number(ev.target.value)||1); return; }
+  /* a part number typed onto a BOM line by hand - no render, keep the caret */
+  if(ev.target.classList && ev.target.classList.contains("bommpn")){
+    const i = Number(ev.target.dataset.i);
+    if(ui.bomRows && ui.bomRows[i]) ui.bomRows[i].mpn = ev.target.value.trim();
+    return;
+  }
   if(ev.target.id==="lcscRelay"){ lcsc.relay = ev.target.value.trim(); lcscSave(); return; }
   const map = {ghRepo:"repo", ghPath:"path", ghBranch:"branch", ghToken:"token"};
   const k = map[ev.target.id];
@@ -4288,7 +4342,7 @@ document.addEventListener("visibilitychange", ()=>{
 function normalize(d){
   d.parts = (d.parts||[]).map((p,i)=>({
     id: Number(p.id||i+1), cat:p.cat||"", lcsc:(p.lcsc||"").toUpperCase(), mpn:p.mpn||"",
-    val:p.val||"", pkg:p.pkg||"", mfr:p.mfr||"", qty:Number(p.qty||0),
+    val:p.val||"", pkg:padPkg(p.pkg), mfr:p.mfr||"", qty:Number(p.qty||0),
     min:(p.min===null||p.min===undefined||p.min==="")?null:Number(p.min),
     box:(p.box||"").toUpperCase(), desc:p.desc||"", src:p.src||""
   }));
