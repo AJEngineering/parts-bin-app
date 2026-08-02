@@ -987,12 +987,16 @@ function bomSheet(vendor){
 function bomXlsx(vendor){ return xlsxBlob("BOM", bomSheet(vendor)); }
 
 /* ------------------------------------------- something else that would do -
-   A line the bin cannot fill exactly may still be buildable: a 10kΩ 0603 is
-   a 10kΩ 0603 whoever made it, and the drawer may hold one under a different
-   part number. Only what is on the shelf is offered, and only where the
-   value agrees - the package is reported rather than required, because
-   fitting an 0805 where the board wants an 0603 is the person's call and
-   not this program's.                                                       */
+   Off unless asked for, and worth understanding before it is switched on.
+
+   The value a bin records for a capacitor reads "25V 4.7uF X5R ±10%", and
+   the matcher reduces that to a single magnitude before comparing. So a
+   50V 4.7uF and a 25V 4.7uF look identical to it, as do ±1% and ±20%. On a
+   decoupling cap that is nothing; on a divider setting a feedback voltage,
+   or a cap across the mains, it is the wrong part with the right number on
+   it. Nothing here can tell those apart, so this suggests and never fills,
+   it prints both value strings side by side for the eye to judge, and it
+   stays off until someone turns it on.                                     */
 /* 10k and 10kΩ are the same value; so are Schottky and schottky, which no
    amount of arithmetic will tell you - fall back to the words themselves   */
 function valKey(v){
@@ -1126,6 +1130,13 @@ function guessValueList(){
    can change that - the request has to be repeated by a relay that does send
    the header. Set your own under Data; the public ones are a fallback only,
    they are run by strangers as a favour and any of them may be down today.  */
+/* how this page is being used, not what is in the bin - so it stays in the
+   browser and never travels into the inventory file                        */
+const PREF_KEY = "parts-bin-prefs-v1";
+const prefs = {bomAlts:false};
+function prefsLoad(){ try{ const t=localStorage.getItem(PREF_KEY); if(t) Object.assign(prefs, JSON.parse(t)); }catch(e){} }
+function prefsSave(){ try{ localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); }catch(e){} }
+
 const LCSC_KEY = "parts-bin-lcsc-v1";
 const LCSC_API = "https://wmsc.lcsc.com/ftps/wm/product/detail?productCode=";
 /* Named so a failure can say which one failed. Ordered by what actually
@@ -3094,18 +3105,36 @@ function viewBom(){
          its zero again; in a sheet the cell stays text. Mounting type is filled only where the package says it plainly —
          an SMD part labelled through-hole costs a panel, so anything unclear is left blank for you to answer.</p>
     </div>
+    <div class="sheetbar" style="margin-bottom:8px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+        <input type="checkbox" id="bomAltsToggle"${prefs.bomAlts?" checked":""}>
+        offer what else is in the bin at the same value</label>
+      <span style="color:var(--ink3);font-size:11.5px">${prefs.bomAlts
+        ? "Value and package only — a 50V part and a 25V part look the same to it, so read the voltage and the tolerance before you fit one."
+        : "Off: only exact matches are shown."}</span>
+    </div>
     <table><thead><tr><th>Line</th><th>Matched</th><th>How</th><th class="num">Need</th>
       <th class="num">Have</th><th class="num">Short</th><th>Box</th><th>Status</th></tr></thead><tbody>
     ${rows.map(r=>{
       const st = BOM_STATE[r.state];
-      /* nothing exact on the shelf - say what is there that would do */
-      const alt = (r.state==="missing" || r.short>0) ? bomAlternatives(r) : [];
+      /* nothing exact on the shelf - say what is there that would do, but
+         only when asked: see the note over bomAlternatives              */
+      const alt = (prefs.bomAlts && (r.state==="missing" || r.short>0)) ? bomAlternatives(r) : [];
       return `<tr><td class="m">${esc(r.mpn||r.lcsc||r.val)}${r.ref?`<br><span style="color:var(--ink3);font-size:11px">${esc(r.ref)}</span>`:""}</td>
         <td class="m">${r.part?esc(r.part.mpn||r.part.lcsc):`<span style="color:var(--ink3)">—</span>`}${
-          alt.length?`<div style="font-size:11px;color:var(--ink2);font-family:var(--ui);margin-top:3px">
-            ${alt.map(a=>`<div><b class="m" style="color:var(--esd)">${esc(a.p.mpn||a.p.lcsc||a.p.val)}</b>
+          /* matched on the number alone: 4.7uF is 4.7uF to the matcher whether
+             it is rated 25V or 50V, so show the wording when it differs   */
+          (r.part && /^value/.test(r.how||"") && r.val && r.part.val &&
+           r.val.trim().toUpperCase() !== r.part.val.trim().toUpperCase())
+            ? `<br><span style="font-size:10.5px;color:var(--kapton)">${esc(r.part.val)}</span>`
+            : ""}${
+          alt.length?`<div style="font-size:11px;color:var(--ink2);font-family:var(--ui);margin-top:4px">
+            ${alt.map(a=>`<div style="margin-bottom:3px">
+              <b class="m" style="color:var(--esd)">${esc(a.p.mpn||a.p.lcsc||a.p.val)}</b>
               in ${esc(a.p.box||"—")} · ${num(a.p.qty)} left${
-              a.samePkg?" · same package":(a.p.pkg?` · <span style="color:var(--kapton)">${esc(a.p.pkg)}, not ${esc(r.pkg||"?")}</span>`:"")}</div>`).join("")}
+              a.samePkg?" · same package":(a.p.pkg?` · <span style="color:var(--kapton)">${esc(a.p.pkg)}, not ${esc(r.pkg||"?")}</span>`:"")}
+              ${a.p.val?`<br><span class="m" style="font-size:10.5px;color:var(--ink3)">${esc(a.p.val)}</span>`:""}</div>`).join("")}
+            <div style="font-size:10.5px;color:var(--ink3)">compare the voltage and the tolerance yourself</div>
           </div>`:""}</td>
         <td style="font-size:11.5px;color:var(--ink3)">${esc(r.how||"")}</td>
         <td class="num m">${r.need}</td>
@@ -4423,6 +4452,7 @@ document.addEventListener("change", ev=>{
     gh.auto = ev.target.checked; ghSave(); render();
     if(gh.auto && ghReady() && !ghPulled) ghPull();
   }
+  if(ev.target.id==="bomAltsToggle"){ prefs.bomAlts = ev.target.checked; prefsSave(); render(); }
   if(ev.target.id==="lcscAuto"){   lcsc.auto   = ev.target.checked; lcscSave(); }
   if(ev.target.id==="lcscPublic"){ lcsc.public = ev.target.checked; lcscSave(); }
   if(ev.target.id==="sort"){ ui.sort=ev.target.value; render(); }
@@ -4491,6 +4521,7 @@ function normalize(d){
     devLoad();
     ghLoad();
     lcscLoad();
+    prefsLoad();
     const saved = localLoad();
     db = normalize(saved && Array.isArray(saved.parts) && saved.parts.length ? saved : JSON.parse(JSON.stringify(SEED)));
     chip(saved?true:localSave());
