@@ -904,6 +904,91 @@ function runBom(){
   });
 }
 
+/* ------------------------------------------------- a BOM a fab will take --
+   PCBWay asks for the line number, quantity, reference designator, part
+   number, description, package and mounting type, and for a turn-key order
+   also the manufacturer and the distributor's code. NextPCB asks for the
+   designator, quantity, description, footprint, manufacturer and part
+   number. The same facts either way, under different headings - so each gets
+   a file with the headings it asks for rather than one that half-suits both.
+   Both take CSV.                                                            */
+const SMD_PKG = /^\d{3,4}$|SOT|SOD|SOP|QFN|QFP|SOIC|MSOP|TSSOP|DFN|BGA|LGA|SMD|CHIP|WSON|UDFN|CSP/i;
+const THT_PKG = /^(DIP|TO-?\d|RADIAL|AXIAL|THT|SIP|ZIP|PLCC|DO-?\d|HEADER)/i;
+/* an SMD part called through-hole is a scrapped panel, so anything the
+   package does not say outright is left for a human to answer             */
+function bomMount(pkg){
+  const p = String(pkg||"").trim();
+  if(!p) return "";
+  if(THT_PKG.test(p)) return "THT";
+  if(SMD_PKG.test(p)) return "SMD";
+  return "";
+}
+
+/* what the line knows, filled out from the part it matched on the shelf */
+function bomOut(r){
+  const p = r.part || {};
+  return {ref:  r.ref || "",
+          qty:  r.need || 0,
+          mpn:  r.mpn || p.mpn || "",
+          mfr:  r.mfr || p.mfr || "",
+          desc: r.desc || p.desc || r.val || p.val || "",
+          pkg:  r.pkg || p.pkg || "",
+          lcsc: (r.lcsc || p.lcsc || "").toUpperCase()};
+}
+
+function bomCsv(vendor){
+  const rows = (ui.bomRows||[]).map(bomOut);
+  const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
+  let head, body;
+  if(vendor==="pcbway"){
+    head = ["Item","Quantity","Reference Designator","Manufacturer Part Number","Manufacturer",
+            "Description","Package","Type","Distributor Part Number"];
+    body = rows.map((o,i)=>[i+1, o.qty, o.ref, o.mpn, o.mfr, o.desc, o.pkg, bomMount(o.pkg), o.lcsc]);
+  } else {
+    head = ["Designator","Quantity","Manufacturer Part Number","Manufacturer",
+            "Description","Footprint","LCSC Part Number"];
+    body = rows.map(o=>[o.ref, o.qty, o.mpn, o.mfr, o.desc, o.pkg, o.lcsc]);
+  }
+  /* the mark at the front is what makes Excel read UTF-8 rather than guess */
+  return "﻿" + [head.map(q).join(",")].concat(body.map(r=>r.map(q).join(","))).join("\r\n");
+}
+
+/* lines carrying only a supplier code: a fab cannot source from one, so the
+   manufacturer's number is read off LCSC and written onto the line          */
+function bomGaps(){
+  return (ui.bomRows||[]).filter(r=> lcscCode(r.lcsc) &&
+    !String(r.mpn||"").trim() && !(r.part && String(r.part.mpn||"").trim()));
+}
+let bomFillStop = false;
+
+async function bomFillMpn(){
+  const list = bomGaps();
+  bomFillStop = false;
+  let done = 0, filled = 0;
+  const failed = [];
+  for(const r of list){
+    if(bomFillStop) break;
+    const w = $("#bomWork");
+    if(w) w.innerHTML = `<div class="lcscnote" style="margin-top:10px">Reading <b>${done+1}</b> of ${list.length}${
+        failed.length?` · ${failed.length} could not be read`:""}…</div>
+      <div class="sheetbar"><button class="btn ghost" id="bomFillHalt">Stop</button></div>`;
+    try{
+      const got = lcscMap(await lcscFetch(lcscCode(r.lcsc)));
+      if(got.mpn){ r.mpn = got.mpn; filled++; }
+      if(got.mfr && !r.mfr)   r.mfr = got.mfr;
+      if(got.pkg && !r.pkg)   r.pkg = got.pkg;
+      if(got.desc && !r.desc) r.desc = got.desc;
+    }catch(e){ failed.push(r.lcsc); }
+    done++;
+    if(done < list.length && !bomFillStop) await new Promise(res=>setTimeout(res,250));
+  }
+  render();
+  const w = $("#bomWork");
+  if(w) w.innerHTML = `<div class="lcscnote" style="margin-top:10px">Read ${done} of ${list.length}${
+    bomFillStop?" before stopping":""} — <b>${filled} part numbers filled in</b>${
+    failed.length?` · <span class="bad">${failed.length} could not be read: ${esc(failed.slice(0,6).join(", "))}</span>`:""}.</div>`;
+}
+
 /* --------------------------------------------------------------- ordering -
    Everything worth buying: the shortfalls of the last BOM run, plus anything
    at or below its own alert level.                                          */
@@ -2911,6 +2996,25 @@ function viewBom(){
       <div class="stat"><b style="color:var(--alert)">${n("missing")}</b><span class="lab">not in the bin</span></div>
       <div class="stat"><b>${isFinite(canBuild)?canBuild:0}</b><span class="lab">boards buildable now</span></div>
     </div>
+    <div class="panel"><h2>Send it to a fab</h2>
+      <p>A board house sources from the manufacturer's part number, not from a supplier code — a line carrying only
+         <span class="pn">C1779</span> tells them nothing. Whatever is missing is read off LCSC first, then the file
+         goes out with the columns each house asks for.</p>
+      <div class="kv">
+        <b>lines</b><span>${rows.length}</span>
+        <b>with a part number</b><span>${rows.filter(r=>bomOut(r).mpn).length}</span>
+        <b>with only an LCSC code</b><span${bomGaps().length?' style="color:var(--kapton);font-weight:600"':""}>${bomGaps().length}</span>
+        <b>with neither</b><span${rows.filter(r=>!bomOut(r).mpn && !bomOut(r).lcsc).length?' style="color:var(--alert);font-weight:600"':""}>${rows.filter(r=>!bomOut(r).mpn && !bomOut(r).lcsc).length}</span></div>
+      <div class="sheetbar" style="margin-top:10px;flex-wrap:wrap">
+        <button class="btn ghost" id="bomFillMpn"${bomGaps().length?"":" disabled"}>Fill ${bomGaps().length} part numbers from LCSC</button>
+        <span class="grow"></span>
+        <button class="btn" id="bomCsvPcbway">Export for PCBWay</button>
+        <button class="btn" id="bomCsvNextpcb">Export for NextPCB</button>
+      </div>
+      <div id="bomWork"></div>
+      <p style="color:var(--ink3);font-size:12px;margin-top:10px">Mounting type is written only where the package says
+         it plainly — an SMD part labelled through-hole costs a panel, so anything unclear is left blank for you to answer.</p>
+    </div>
     <table><thead><tr><th>Line</th><th>Matched</th><th>How</th><th class="num">Need</th>
       <th class="num">Have</th><th class="num">Short</th><th>Box</th><th>Status</th></tr></thead><tbody>
     ${rows.map(r=>{
@@ -3640,6 +3744,20 @@ document.addEventListener("click", async ev=>{
     return;
   }
   if(t.id==="bomClear"){ ui.bomText=""; ui.bomRows=null; render(); return; }
+
+  if(t.id==="bomFillMpn"){ t.disabled = true; await bomFillMpn(); return; }
+  if(t.id==="bomFillHalt"){ bomFillStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
+  if(t.id==="bomCsvPcbway" || t.id==="bomCsvNextpcb"){
+    const rows = ui.bomRows || [];
+    if(!rows.length) return toast("Check a BOM against the bin first");
+    const vendor = t.id==="bomCsvPcbway" ? "pcbway" : "nextpcb";
+    const name = (ui.bomName||"bom").trim().replace(/[^\w.-]+/g,"-").replace(/^-|-$/g,"") || "bom";
+    download(name+"-"+vendor+".csv", bomCsv(vendor), "text/csv");
+    const noPn = rows.filter(r=>!bomOut(r).mpn).length;
+    toast(noPn ? rows.length+" lines exported — "+noPn+" still carry no part number"
+               : rows.length+" lines exported");
+    return;
+  }
 
   if(t.id==="bomSave"){
     const name = ($("#bomName").value||"").trim();

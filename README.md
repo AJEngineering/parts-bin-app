@@ -96,6 +96,23 @@ number already filled in, and **Save and add another** keeps the box and the cat
 clearing the rest — so a new drawer can be filled without the form closing once. Combined with the
 LCSC lookup, adding a part is: paste code → Fetch → Save and add another.
 
+### Sending a BOM to a board house
+
+After checking a BOM against the bin, **Send it to a fab** exports it in the shape PCBWay and
+NextPCB each ask for — PCBWay wants an item number, quantity, reference designator, part number,
+description, package and mounting type; NextPCB wants designator, quantity, description, footprint,
+manufacturer and part number. Same facts, different headings, so you get the right file for the
+house you are using.
+
+A fab sources from the manufacturer's part number, not a supplier code, so a line carrying only
+`C1779` is useless to them. **Fill N part numbers from LCSC** reads the missing ones off LCSC and
+writes them onto the lines first. Lines that matched something already on your shelf take the
+manufacturer and description from there.
+
+Mounting type is only written where the package says so plainly — `0603` is SMD, `DIP-8` is
+through-hole, anything ambiguous is left blank rather than guessed, because an SMD part labelled
+through-hole costs a panel.
+
 ### Search
 
 The field at the top filters as you type. Several words all have to match, in any field.
