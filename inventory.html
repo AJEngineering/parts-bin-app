@@ -923,6 +923,22 @@ function runBom(){
   });
 }
 
+/* Decide every line against the shelf again without re-reading the text.
+   The part numbers fetched from LCSC, and the ones typed in by hand, live on
+   the rows and nowhere else - re-parsing would throw all of them away, which
+   is not what changing how a line is matched should cost. The quantity is
+   already multiplied out by the board count, so it is left alone.         */
+function rematchBom(){
+  if(!ui.bomRows) return;
+  ui.bomRows = ui.bomRows.map(r=>{
+    const m = matchBom(r);
+    const have = m.p ? Number(m.p.qty||0) : 0;
+    return Object.assign({}, r, {have, short: Math.max(0, r.need-have),
+                                 part:m.p, how:m.how,
+                                 state: !m.p ? "missing" : (have>=r.need ? "ok" : "short")});
+  });
+}
+
 /* ------------------------------------------------- a BOM a fab will take --
    PCBWay asks for the line number, quantity, reference designator, part
    number, description, package and mounting type, and for a turn-key order
@@ -4424,7 +4440,7 @@ document.addEventListener("change", ev=>{
   }
   if(ev.target.id==="bomMatchMode"){
     prefs.bomMatch = ev.target.value; prefsSave();
-    if(ui.bomRows) runBom();          /* the answer changes, so ask it again */
+    rematchBom();      /* re-decide, but keep what has been filled in */
     ui.order = null; render();
     return;
   }
