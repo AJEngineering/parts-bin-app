@@ -888,8 +888,19 @@ function matchBom(row){
   if(row.val){
     const v = normValue(row.val), k = normPkg(row.pkg);
     if(v){
-      const h = db.parts.find(p=> normValue(p.val)===v && (!k || normPkg(p.pkg)===k));
-      if(h) return {p:h, how:k?"value + package":"value"};
+      const hits = db.parts.filter(p=> normValue(p.val)===v && (!k || normPkg(p.pkg)===k));
+      if(hits.length === 1) return {p:hits[0], how: k ? "value + package" : "value"};
+      if(hits.length > 1){
+        /* Several parts answer to this value. With a package given they are
+           the same component from different makers and the first will do.
+           Without one they are not: a bin holding 1kΩ in 0402, 0603, 0805
+           and 1206 would hand back whichever was entered first, and the file
+           would go to the fab carrying that part number and that footprint.
+           Refusing is the only honest answer - say so and let it be fixed. */
+        if(k) return {p:hits[0], how:"value + package"};
+        return {p:null, how:"", why:"the line gives no footprint and "+hits.length+
+                " parts share that value: "+[...new Set(hits.map(p=>p.pkg||"?"))].join(", ")};
+      }
     }
   }
   return {p:null, how:""};
@@ -918,7 +929,7 @@ function runBom(){
     const need  = r.need * boards;
     const have  = m.p ? Number(m.p.qty||0) : 0;
     return Object.assign({}, r, {need, have, short: Math.max(0, need-have),
-                                 part:m.p, how:m.how,
+                                 part:m.p, how:m.how, why:m.why||"",
                                  state: !m.p ? "missing" : (have>=need ? "ok" : "short")});
   });
 }
@@ -934,7 +945,7 @@ function rematchBom(){
     const m = matchBom(r);
     const have = m.p ? Number(m.p.qty||0) : 0;
     return Object.assign({}, r, {have, short: Math.max(0, r.need-have),
-                                 part:m.p, how:m.how,
+                                 part:m.p, how:m.how, why:m.why||"",
                                  state: !m.p ? "missing" : (have>=r.need ? "ok" : "short")});
   });
 }
@@ -3122,7 +3133,8 @@ function viewBom(){
            r.val.trim().toUpperCase() !== r.part.val.trim().toUpperCase())
             ? `<br><span style="font-size:10.5px;color:var(--kapton)">${esc(r.part.val)}</span>`
             : ""}</td>
-        <td style="font-size:11.5px;color:var(--ink3)">${esc(r.how||"")}</td>
+        <td style="font-size:11.5px;color:var(--ink3)">${esc(r.how||"")}${
+          r.why?`<span style="color:var(--kapton)">${esc(r.why)}</span>`:""}</td>
         <td class="num m">${r.need}</td>
         <td class="num m">${r.part?num(r.have):""}</td>
         <td class="num m" style="color:${r.short?"var(--alert)":"var(--ink3)"}">${r.short||""}</td>
