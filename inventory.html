@@ -3814,12 +3814,18 @@ function zipStore(files){
   const enc = new TextEncoder();
   const u16 = n => [n&255, (n>>>8)&255];
   const u32 = n => [n&255, (n>>>8)&255, (n>>>16)&255, (n>>>24)&255];
+  /* A DOS stamp of zero means day 0 of month 0, which is not a date. Some
+     readers shrug; a strict one refuses the whole archive, and the upload
+     comes back as a system error with nothing said about why.            */
+  const d = new Date();
+  const time = ((d.getHours()<<11) | (d.getMinutes()<<5) | (d.getSeconds()>>1)) & 0xFFFF;
+  const date = (((d.getFullYear()-1980)<<9) | ((d.getMonth()+1)<<5) | d.getDate()) & 0xFFFF;
   const parts = [], dir = [];
   let at = 0;
   for(const f of files){
     const name = enc.encode(f.name), data = enc.encode(f.text), crc = crc32(data);
     const local = new Uint8Array([...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0),
-      ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length),
+      ...u16(time), ...u16(date), ...u32(crc), ...u32(data.length), ...u32(data.length),
       ...u16(name.length), ...u16(0)]);
     parts.push(local, name, data);
     dir.push({name, crc, size:data.length, at});
@@ -3829,7 +3835,7 @@ function zipStore(files){
   let cdLen = 0;
   for(const e of dir){
     const h = new Uint8Array([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0),
-      ...u16(0), ...u16(0), ...u32(e.crc), ...u32(e.size), ...u32(e.size),
+      ...u16(time), ...u16(date), ...u32(e.crc), ...u32(e.size), ...u32(e.size),
       ...u16(e.name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(e.at)]);
     central.push(h, e.name);
     cdLen += h.length + e.name.length;
@@ -3845,33 +3851,98 @@ const xmlEsc = s => String(s==null?"":s).replace(/[&<>"']/g,
 function colName(n){ let s=""; n++; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=(n-m-1)/26; } return s; }
 
 /* rows: an array of arrays. A finite number is written as a number; anything
-   else goes in as text, which is what keeps 0402 from becoming 402.       */
+   else goes in as text, which is what keeps 0402 from becoming 402.
+
+   Written the long way on purpose. A sheet with nothing but sheetData opens
+   in Excel and passes a zip check, and is still refused by the parsers a
+   board house runs: they want the shared string table rather than strings
+   inlined, they expect a stylesheet to exist, and several read the declared
+   dimension before the rows. NextPCB answered such a file with an unexplained
+   system error. So the parts every reader looks for are all present.      */
 function xlsxBlob(sheetName, rows){
+  const P = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+  /* one entry per distinct string, cells point at it by index */
+  const strings = [], seen = new Map();
+  const strIdx = s => {
+    if(seen.has(s)) return seen.get(s);
+    const i = strings.length; strings.push(s); seen.set(s, i); return i;
+  };
+  let cellCount = 0, wide = 0;
   const sheet = rows.map((cells,r)=>{
+    if(cells.length > wide) wide = cells.length;
     const cs = cells.map((v,c)=>{
       const ref = colName(c)+(r+1);
-      if(typeof v === "number" && isFinite(v)) return `<c r="${ref}"><v>${v}</v></c>`;
+      if(typeof v === "number" && isFinite(v)){ cellCount++; return `<c r="${ref}"><v>${v}</v></c>`; }
       const s = String(v==null?"":v);
-      return s ? `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xmlEsc(s)}</t></is></c>`
-               : `<c r="${ref}"/>`;
+      if(!s) return `<c r="${ref}"/>`;
+      cellCount++;
+      return `<c r="${ref}" t="s"><v>${strIdx(s)}</v></c>`;
     }).join("");
-    return `<row r="${r+1}">${cs}</row>`;
+    return `<row r="${r+1}" spans="1:${cells.length||1}">${cs}</row>`;
   }).join("");
-  const P = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const dim = "A1:" + colName(Math.max(0, wide-1)) + Math.max(1, rows.length);
+  const stamp = new Date().toISOString().replace(/\.\d+Z$/,"Z");
+
   return zipStore([
     {name:"[Content_Types].xml", text:P+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">`+
       `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>`+
       `<Default Extension="xml" ContentType="application/xml"/>`+
       `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`+
-      `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`},
+      `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`+
+      `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>`+
+      `<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>`+
+      `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`+
+      `<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`},
+
     {name:"_rels/.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
-      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`},
-    {name:"xl/workbook.xml", text:P+`<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" `+
-      `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">`+
+      `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/>`+
+      `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>`+
+      `<Relationship Id="rId3" Type="${REL}/extended-properties" Target="docProps/app.xml"/></Relationships>`},
+
+    {name:"docProps/core.xml", text:P+`<cp:coreProperties `+
+      `xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" `+
+      `xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" `+
+      `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">`+
+      `<dc:title>${xmlEsc(sheetName)}</dc:title><dc:creator>Parts Bin</dc:creator>`+
+      `<cp:lastModifiedBy>Parts Bin</cp:lastModifiedBy>`+
+      `<dcterms:created xsi:type="dcterms:W3CDTF">${stamp}</dcterms:created>`+
+      `<dcterms:modified xsi:type="dcterms:W3CDTF">${stamp}</dcterms:modified></cp:coreProperties>`},
+
+    {name:"docProps/app.xml", text:P+`<Properties `+
+      `xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" `+
+      `xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">`+
+      `<Application>Parts Bin</Application></Properties>`},
+
+    {name:"xl/workbook.xml", text:P+`<workbook xmlns="${NS}" xmlns:r="${REL}">`+
+      `<workbookPr/><bookViews><workbookView xWindow="0" yWindow="0" windowWidth="16384" windowHeight="8192"/></bookViews>`+
       `<sheets><sheet name="${xmlEsc(sheetName).slice(0,31)}" sheetId="1" r:id="rId1"/></sheets></workbook>`},
+
     {name:"xl/_rels/workbook.xml.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
-      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`},
-    {name:"xl/worksheets/sheet1.xml", text:P+`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`+
+      `<Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/>`+
+      `<Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/>`+
+      `<Relationship Id="rId3" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/></Relationships>`},
+
+    /* the smallest stylesheet Excel calls valid: the first two fills and the
+       one cellXfs entry are required even when nothing is styled           */
+    {name:"xl/styles.xml", text:P+`<styleSheet xmlns="${NS}">`+
+      `<fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts>`+
+      `<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>`+
+      `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>`+
+      `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>`+
+      `<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>`+
+      `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>`+
+      `</styleSheet>`},
+
+    {name:"xl/sharedStrings.xml", text:P+`<sst xmlns="${NS}" count="${cellCount}" uniqueCount="${strings.length}">`+
+      strings.map(s=>`<si><t xml:space="preserve">${xmlEsc(s)}</t></si>`).join("")+`</sst>`},
+
+    {name:"xl/worksheets/sheet1.xml", text:P+`<worksheet xmlns="${NS}" xmlns:r="${REL}">`+
+      `<dimension ref="${dim}"/>`+
+      `<sheetViews><sheetView tabSelected="1" workbookViewId="0"/></sheetViews>`+
+      `<sheetFormatPr defaultRowHeight="15"/>`+
       `<sheetData>${sheet}</sheetData></worksheet>`}
   ]);
 }
