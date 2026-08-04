@@ -2325,7 +2325,7 @@ const NEW_CALCS = [
 {id:"react", group:"Components", name:"Reactance Xc and XL",
  note:"What a capacitor or an inductor looks like at one frequency.",
  fields:[F("f","Frequency","Hz","1k"),F("C","Capacitance","F","100n"),F("L","Inductance","H","10u"),
-         F("Rs","Series resistance (optional)","\\u03a9","0.5")],
+         F("Rs","Series resistance (optional)","Ω","0.5")],
  run(v){
    const {f,C,L,Rs} = v;
    if(!isFinite(f) || f<=0) return null;
@@ -2348,7 +2348,7 @@ const NEW_CALCS = [
 
 {id:"zener", group:"Power", name:"Zener shunt regulator",
  note:"Rs feeds both the zener and the load. The zener has to swallow whatever the load does not take.",
- fields:[F("Vin","Input","V","12"),F("Vz","Zener voltage","V","5.1"),F("Rs","Series resistor","\\u03a9","220"),
+ fields:[F("Vin","Input","V","12"),F("Vz","Zener voltage","V","5.1"),F("Rs","Series resistor","Ω","220"),
          F("Il","Load current","A","10m"),F("Pz","Zener power rating","W","0.5")],
  run(v){
    const {Vin,Vz,Rs,Il,Pz} = v;
@@ -2518,7 +2518,7 @@ const WIRE_CALCS = [
  note:"R = \u03c1L/A with A = \u03c0D\u00b2/4. Using the diameter directly instead of the area is a common error \u2014 it drops the square and understates the resistance badly on thin wire.",
  fields:[F("L","Length","m","100"),F("D","Conductor diameter","mm","0.2"),
          FS("mat","Material",Object.keys(RHO),"Copper, pure"),
-         F("Rm","Measured resistance (optional)","\\u03a9","")],
+         F("Rm","Measured resistance (optional)","Ω","")],
  run(v){
    const {L,D,mat,Rm} = v;
    if(!isFinite(L)||!isFinite(D)||L<=0||D<=0) return null;
@@ -2548,7 +2548,7 @@ const WIRE_CALCS = [
 {id:"cable", group:"Wire", name:"Cable size & voltage drop",
  note:"Sizing a run for a current and an acceptable drop. The length is one way; the calculation uses the round trip.",
  fields:[F("I","Current","A","32"),F("L","One way length","m","15"),F("V","System voltage","V","230"),
-         F("drop","Allowed drop","%","3"),F("A","Or a cross section you already have","mm\\u00b2","")],
+         F("drop","Allowed drop","%","3"),F("A","Or a cross section you already have","mm²","")],
  run(v){
    const {I,L,V,drop,A} = v;
    if(!isFinite(I)||!isFinite(L)||I<=0||L<=0) return null;
@@ -2580,9 +2580,9 @@ const POWER_CALCS = [
  note:"Conduction, switching and gate charge. Rds(on) rises with temperature \u2014 the datasheet figure at 25 \u00b0C is optimistic by roughly 1.4\u00d7 at 100 \u00b0C.",
  fields:[F("Vds","Switched voltage","V","400"),F("Id","Drain current","A","2"),
          F("D","Duty cycle","%","40"),F("f","Switching frequency","Hz","65k"),
-         F("Rds","Rds(on)","\\u03a9","0.3"),F("tsw","Rise + fall time","s","60n"),
+         F("Rds","Rds(on)","Ω","0.3"),F("tsw","Rise + fall time","s","60n"),
          F("Qg","Gate charge","C","20n"),F("Vg","Gate drive","V","12"),
-         F("Rja","\\u03b8JA or \\u03b8JC + heatsink","\\u00b0C/W","62"),F("Ta","Ambient","\\u00b0C","40")],
+         F("Rja","θJA or θJC + heatsink","°C/W","62"),F("Ta","Ambient","°C","40")],
  run(v){
    const {Vds,Id,D,f,Rds,tsw,Qg,Vg,Rja,Ta} = v;
    if(!isFinite(Id)||!isFinite(Rds)) return null;
@@ -2612,9 +2612,9 @@ const POWER_CALCS = [
 
 {id:"heatsink", group:"Power", name:"Heatsink selection",
  note:"The thermal path is a series of resistances: junction to case, case to sink, sink to air. Only the last one is yours to choose.",
- fields:[F("Pd","Dissipation","W","4.35"),F("Tj","Junction limit","\\u00b0C","125"),
-         F("Ta","Ambient","\\u00b0C","40"),F("Rjc","\\u03b8JC","\\u00b0C/W","3"),
-         F("Rcs","\\u03b8CS pad or grease","\\u00b0C/W","0.5"),F("Rsa","\\u03b8SA of a sink you have","\\u00b0C/W","")],
+ fields:[F("Pd","Dissipation","W","4.35"),F("Tj","Junction limit","°C","125"),
+         F("Ta","Ambient","°C","40"),F("Rjc","θJC","°C/W","3"),
+         F("Rcs","θCS pad or grease","°C/W","0.5"),F("Rsa","θSA of a sink you have","°C/W","")],
  run(v){
    const {Pd,Tj,Ta,Rjc,Rcs,Rsa} = v;
    if(!isFinite(Pd)||!isFinite(Tj)||!isFinite(Ta)||Pd<=0) return null;
@@ -3206,8 +3206,23 @@ function viewLabels(){
     }).join("")}</div>`;
 }
 
+/* A calculator that opens blank reads as a broken one. The boxes carry a
+   greyed example that looks like a filled-in value, and the answer under them
+   says nothing - so the page appears to have given up rather than to be
+   waiting. Seeding the fields from those examples the first time a calculator
+   is opened lands it on its own worked sum, which is also the quickest way to
+   see what it is for. Done once per calculator: clearing a box afterwards
+   leaves it cleared.                                                       */
+function calcSeed(c){
+  if(ui.calcVals[c.id]) return;
+  const v = {};
+  c.fields.forEach(f=>{ if(f.ph !== undefined && f.ph !== "") v[f.k] = String(f.ph); });
+  ui.calcVals[c.id] = v;
+}
+
 function viewCalc(){
   const c = calcById(ui.calc);
+  calcSeed(c);
   const raw = ui.calcVals[c.id] || {};
   return `<div class="panel"><h2>${esc(c.name)}</h2>
       ${c.note?`<p>${esc(c.note)}</p>`:""}
