@@ -6,6 +6,8 @@ No server, no build step, no account, no dependencies. Open `inventory.html` in 
 works — from a hard disk, from a USB stick, or from any address you serve it at. Type an LCSC part
 code and the rest of the part fills itself in.
 
+![The parts list](docs/Parts.png)
+
 **MIT licensed** — use it, change it, build on it, sell what you make with it. Just keep the
 copyright notice with the copies you pass on.
 
@@ -26,7 +28,7 @@ no framework and nothing to keep up to date.
 
 ## Quick start
 
-1. Download [`inventory.html`](inventory.html).
+1. Download [`inventory.html`](../../releases/latest) — or clone the repo and open the file.
 2. Open it in a browser.
 3. Go to **Data** and either:
    - press **Connect a data file** and pick a `.json` file on disk — every edit is written to it
@@ -36,11 +38,29 @@ no framework and nothing to keep up to date.
 4. Add your first part, or paste a delivery into **Order → Receive** to book several in at once.
 
 The page ships with no inventory in it. The program and your stock are separate files on purpose —
-you can replace either one without touching the other.
+you can replace either one without touching the other. There is a small
+[`example-components.json`](example-components.json) to try it with.
 
 > **Browser note:** the "connect a file" option uses the File System Access API, which currently
 > means a Chromium browser (Chrome, Edge, Brave, Opera). Everything else works anywhere; on Firefox
 > and Safari, use **Save a copy** / **Load a file**, or the GitHub sync.
+
+## What's in it
+
+| View | What it does |
+| --- | --- |
+| **Parts** | Search, filter and count what is on the shelf |
+| **Boxes** | Which drawer holds what, plus the next free box number |
+| **BOM** | Paste a bill of materials and see what you can build right now |
+| **Order** | What has run low, ready to paste into the LCSC bulk order box |
+| **Duplicates** | The same part entered twice under two different names |
+| **Calc** | Everyday bench formulas, each with its schematic drawn |
+| **Log** | Every movement, stamped with the machine that made it |
+| **Data** | The data file, GitHub sync, categories, and the LCSC settings |
+| **About** | What this is, the licence, and where the source lives |
+
+**Boxes → Printable labels** lays the drawers out as a printable sheet, one card per box with what
+is inside it.
 
 ## Filling a part in from LCSC
 
@@ -58,11 +78,24 @@ description and category are read straight off LCSC.
   you; an N-channel MOSFET lands in your `MOSFET N-CH` shelf if you have one, and nowhere if you
   don't.
 
+### Finding the code from a part number
+
+Plenty of parts were entered with only a manufacturer part number. **Find code** beside that field
+searches LCSC for it and offers what comes back.
+
+The search is treated as a guess, because it is one. LCSC answers a part number it does not carry
+with near neighbours: searching `0603SAF8204T5E` returns `0603WAF8204T5E`, a different tolerance
+and the wrong part to write into a bin. So every candidate is read back through the part endpoint
+and its real part number compared with the one asked for. Exact matches and near misses are listed
+separately, nothing is written, and you pick.
+
 ### Catching up parts you already entered
 
+![The data view](docs/Data.png)
+
 **Data → Filling a part in from LCSC** counts how many parts carry an LCSC code but still have a
-field blank, and **Read N parts off LCSC** goes through them in one pass. It shows a progress
-count and can be stopped part-way.
+field blank, and **Read N parts off LCSC** goes through them in one pass, with a progress count
+that can be stopped part-way.
 
 Nothing is written until you have seen the list: the run only *proposes* fills, you look at the
 table, and **Fill in N parts** applies them — with a single **Undo** that puts back exactly the
@@ -77,50 +110,107 @@ a relay. That is already arranged and needs nothing from you — **Data → Test
 whichever relay answered. If one ever goes quiet, you can paste a stand-in without editing the
 file. A relay only ever sees the part code being looked up.
 
-## What's in it
+> **LCSC's own search is unreliable, and that is not this program failing.** It answers
+> `0402WGF1002TCE` with no results while that part sits in their catalogue as `C25744`. When a
+> part-number search comes up empty the message says so plainly rather than claiming the part does
+> not exist — entering the code directly always works.
 
-| View | What it does |
-| --- | --- |
-| **Parts** | Search, filter and count what is on the shelf |
-| **Boxes** | Which drawer holds what, plus the next free box number |
-| **BOM** | Paste a bill of materials and see what you can build right now |
-| **Order** | What has run low, ready to paste into the LCSC bulk order box |
-| **Duplicates** | The same part entered twice under two different names |
-| **Calc** | Everyday bench formulas, each with its schematic drawn |
-| **Log** | Every movement, stamped with the machine that made it |
+## Boxes and drawers
+
+![The box wall](docs/Boxes.png)
+
+The wall down the side is the drawers, sized by how full they are. Clicking one filters the list to
+it; the dashed tile at the end is the first number not in use.
 
 ### Adding a whole drawer at once
 
-Click the dashed **free** tile at the end of the box wall. The part editor opens with that box
-number already filled in, and **Save and add another** keeps the box and the category while
-clearing the rest — so a new drawer can be filled without the form closing once. Combined with the
-LCSC lookup, adding a part is: paste code → Fetch → Save and add another.
+Click that dashed **free** tile. The part editor opens with the box number already filled in, and
+**Save and add another** keeps the box and the category while clearing the rest — so a new drawer
+can be filled without the form closing once. Combined with the LCSC lookup, adding a part is:
+paste code → **Fetch** → **Save and add another**.
 
-### Sending a BOM to a board house
+## Checking a bill of materials
 
-After checking a BOM against the bin, **Send it to a fab** exports it for **PCBWay**, **NextPCB**
-or **PCBGOGO**. The column headings are copied from each house's own template, so the file goes up
-without being rearranged first — NextPCB stars its required columns, PCBGOGO leads with the
-quantity and asks for a buying link, which is filled with the part's LCSC page.
+![The BOM view](docs/Bom.png)
+
+Paste a BOM straight out of KiCad, Altium or a spreadsheet — CSV, semicolons or tabs. A header row
+is detected on its own. It tells you what is in stock, what is short, what is not in the bin at
+all, and how many boards you could build right now.
+
+### How a line is matched
+
+A part number names one part. A value does not: the matcher reduces `25V 4.7uF X5R ±10%` to a
+single magnitude before comparing, so the voltage, the tolerance and the dielectric fall out on the
+way and a 50V ±20% part answers to a 25V ±10% line. On a decoupling cap that is nothing; on a
+divider setting a feedback voltage it is the wrong part. So it is a choice, made above the results:
+
+| Mode | What it does |
+| --- | --- |
+| **part number, then value + package** | Falls back to value and package when a line has no number |
+| **part number only** | A line matches its own part number or LCSC code, or not at all — nothing is inferred from the shelf |
+
+Where a match is still made on value, the matched part's own wording is shown in amber, so a
+mismatch is visible rather than silent. And where several parts share a value and the line names no
+footprint, nothing is matched at all — a bin holding 1kΩ in 0603, 1206 and 0805 would otherwise
+hand back whichever was entered first, and the exported file would carry that part's number and
+that footprint.
+
+### Sending it to a board house
+
+**Send it to a fab** exports the checked BOM for **PCBWay**, **NextPCB** or **PCBGOGO**. The column
+headings are taken from each house's own template, so the file goes up without being rearranged
+first — NextPCB stars its required columns, PCBGOGO leads with the quantity and asks for a buying
+link, which is filled with the part's LCSC page.
+
+Files are written as real **`.xlsx`** workbooks, not CSV. A CSV is read back by Excel as numbers,
+and `0402` loses its leading zero the moment the fab opens it; in a sheet the cell stays text.
 
 A fab sources from the manufacturer's part number, not a supplier code, so a line carrying only
 `C1779` is useless to them. **Fill N part numbers from LCSC** reads the missing ones off LCSC and
 writes them onto the lines. Lines that matched something already on your shelf take the
 manufacturer and description from there. Anything still without a number — a connector LCSC has
-never heard of, a part from another supplier — gets a box under the buttons to type it into, and
-it goes into the file.
+never heard of, a part from another supplier — gets a box under the buttons to type it into, and it
+goes into the file.
 
 Mounting type is only written where the package says so plainly. `TO-220` is through-hole and
 `TO-252` is not; `DO-41` is through-hole and `DO-214` is not; `Plugin` is LCSC's word for
-through-hole. Anything that does not say outright is left blank rather than guessed, because an
-SMD part labelled through-hole costs a panel.
+through-hole. Anything that does not say outright is left blank rather than guessed, because an SMD
+part labelled through-hole costs a panel.
 
 Footprints keep their leading zero. A spreadsheet treats `0402` as a number and hands back `402`,
 which tells a fab nothing — so a three-digit footprint that is really a chip size is padded back
 out, whether it arrives in a pasted BOM, gets typed into the editor, or is already sitting in your
 data file.
 
-### Search
+## Reordering
+
+![The order view](docs/Order.png)
+
+**Order** gathers the shortfalls from the last BOM run and everything at or below its own alert
+level. **Copy for LCSC bulk order** puts it on the clipboard in the two-column form their bulk box
+accepts, so reordering is a paste. Lines with no LCSC code are counted separately, since those have
+to be ordered by part number.
+
+**Order → Receive** takes the delivery note back: paste the supplier's CSV, check it, and book the
+lot in at once. Parts already on the shelf have their quantity added; anything new is created and
+only needs a box.
+
+## Calculators
+
+![The calculators](docs/Calc.png)
+
+Twenty-five bench formulas — dividers, regulators, MOSFET losses, wire gauge, RC and LC, resistor
+colour bands, SMD code decoding — each drawn as a schematic that updates as you type, so you can
+see what the numbers are describing.
+
+## The log
+
+![The movement log](docs/Log.png)
+
+Every add, edit, deletion and stock change, stamped with the machine that made it. Name each
+machine under **Data → This computer**, and the log tells you which bench did what.
+
+## Search
 
 The field at the top filters as you type. Several words all have to match, in any field.
 
@@ -134,10 +224,20 @@ The field at the top filters as you type. Several words all have to match, in an
 | `cat:MCU qty<5` | mix them freely |
 | `/` | jump to the search field from anywhere |
 
-### Box notation
+## Box notation
 
 One box: `C7`. Two boxes with the quantity shared equally: `C1 + C6`. An exact split:
 `C1:25 + C6:20`. The box view uses the same rules.
+
+## Categories
+
+Under **Data → Categories** a category can be dragged to where it belongs, nudged a step with the
+arrows, or the whole list ordered in one click — alphabetically, or fullest first. Both are
+undoable.
+
+That order is the one used everywhere else: the rail down the side, the dropdown in the part
+editor, and the parts list when it is sorted by category. Put the shelves you reach for most at the
+top; a bench is not usually arranged alphabetically.
 
 ## Syncing through GitHub
 
@@ -192,9 +292,6 @@ Parts follow the last machine that pushed. The movement log is *merged* rather t
 entries made on another computer are never lost. If someone else pushed while your tab sat idle,
 your push is refused and you are told to pull first — **Force push** is there if you are certain
 yours is the copy to keep.
-
-Give each machine a name under **Data → This computer**; every movement in the log is stamped with
-it, so you can see which bench did what.
 
 ## Your data
 
