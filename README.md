@@ -68,6 +68,12 @@ Type an LCSC code (`C1779`) into the part editor and press **Fetch** — or just
 it looks the part up on its own. The manufacturer part number, manufacturer, package, value,
 description and category are read straight off LCSC.
 
+![Adding a part, filled in from its LCSC code](docs/AddPart.png)
+
+*Amber marks what the lookup just filled in. The line underneath reports the stock, the price and
+the datasheet — none of which is written into your bin, it is there to tell you whether the part is
+still worth ordering.*
+
 - **Only empty fields are filled.** Anything you have already written is left exactly as it is, and
   what LCSC would have said appears underneath as one click per value, so you take it only if you
   want it.
@@ -80,8 +86,8 @@ description and category are read straight off LCSC.
 
 ### Finding the code from a part number
 
-Plenty of parts were entered with only a manufacturer part number. **Find code** beside that field
-searches LCSC for it and offers what comes back.
+Plenty of parts were entered with only a manufacturer part number. **Find code** — the button beside
+that field in the screenshot above — searches LCSC for it and offers what comes back.
 
 The search is treated as a guess, because it is one. LCSC answers a part number it does not carry
 with near neighbours: searching `0603SAF8204T5E` returns `0603WAF8204T5E`, a different tolerance
