@@ -2006,8 +2006,17 @@ const vv = (raw,k,d)=> (raw && String(raw[k]||"").trim()) ? String(raw[k]).trim(
 /* a computed result, so the drawing can label what the calculator worked out */
 const got = (out,label)=>{
   const r = (out||[]).find(x=>x.label===label);
-  return r ? (typeof r.value==="number" ? siFmt(r.value,r.unit) : String(r.value)) : "";
+  if(!r) return "";
+  if(typeof r.value === "number") return siFmt(r.value, r.unit);
+  /* a row may carry no value at all and put its answer in the note - "Nearest
+     AWG" does exactly that - and String(null) would letter the word "null"
+     across the drawing, which is how it read until now                     */
+  if(r.value === null || r.value === undefined) return String(r.note || "");
+  return String(r.value);
 };
+/* the same, for a caption that reads as an equation: a dash stands in when
+   there is no answer yet, so "P = V × I =" is never left hanging          */
+const gotv = (out,label)=> got(out,label) || "—";
 
 const DIAGRAMS = {
 
@@ -2016,7 +2025,7 @@ ohm: (r,o) => SVG(
   W([[70,90],[70,45],[300,45]]) + W([[70,100],[70,145],[300,145]]) +
   W([[300,45],[300,76]]) + RESV(300,95,"R",vv(r,"R",got(o,"Resistance"))) + W([[300,114],[300,145]]) +
   ARROW(150,45,215,45, vv(r,"I", got(o,"Current"))) +
-  TX(185,120,"P = V \u00d7 I \u2014 "+got(o,"Power"),"middle","var(--ink3)",11), 380, 175),
+  TX(185,120,"P = V \u00d7 I = "+gotv(o,"Power"),"middle","var(--ink3)",11), 380, 175),
 
 divider: (r,o) => SVG(
   W([[120,28],[120,65]]) + NODE(120,20,"Vin") + VAL(152,24,vv(r,"Vin",""),"start") +
@@ -2038,7 +2047,7 @@ rc: (r,o) => SVG(
   RESH(100,70,"R",vv(r,"R","")) +
   W([[119,70],[262,70]]) + DOT(200,70) + NODE(300,66,"out") +
   W([[200,70],[200,101]]) + CAPV(200,105,"C",vv(r,"C","")) + W([[200,109],[200,134]]) + GND(200,134) +
-  TX(140,158,"fc = 1 / 2\u03c0RC \u2014 "+got(o,"Cut-off \u22123 dB"),"middle","var(--ink3)",11), 380, 178),
+  TX(140,158,"fc = 1 / 2\u03c0RC = "+gotv(o,"Cut-off \u22123 dB"),"middle","var(--ink3)",11), 380, 178),
 
 lc: (r,o) => SVG(
   W([[60,105],[90,105]]) + DOT(90,105) + W([[310,105],[340,105]]) + DOT(310,105) +
@@ -2046,7 +2055,7 @@ lc: (r,o) => SVG(
   W([[310,55],[310,105]]) +
   W([[90,105],[90,155]]) + W([[90,155],[192,155]]) + CAPH(196,155,"C",vv(r,"C","")) +
   W([[200,155],[310,155]]) + W([[310,155],[310,105]]) +
-  TX(200,26,"f0 = 1 / 2\u03c0\u221a(LC) \u2014 "+got(o,"Resonant frequency"),"middle","var(--ink3)",11), 400, 200),
+  TX(200,26,"f0 = 1 / 2\u03c0\u221a(LC) = "+gotv(o,"Resonant frequency"),"middle","var(--ink3)",11), 400, 200),
 
 opinv: (r,o) => SVG(
   W([[20,95],[71,95]]) + NODE(20,86,"Vin") +
@@ -2055,7 +2064,7 @@ opinv: (r,o) => SVG(
   RESH(230,45,"Rf",vv(r,"Rf","")) + W([[249,45],[290,45]]) + W([[290,45],[290,110]]) +
   OPAMP(180,110) + W([[232,110],[330,110]]) + DOT(290,110) + NODE(368,114,"out","end") +
   W([[180,125],[150,125]]) + W([[150,125],[150,152]]) + GND(150,152) +
-  TX(250,178,"G = \u2212Rf / Rin \u2014 "+got(o,"Gain"),"middle","var(--ink3)",11), 400, 195),
+  TX(250,178,"G = \u2212Rf / Rin = "+gotv(o,"Gain"),"middle","var(--ink3)",11), 400, 195),
 
 opnon: (r,o) => SVG(
   W([[20,125],[180,125]]) + NODE(20,116,"Vin") +
@@ -2065,7 +2074,7 @@ opnon: (r,o) => SVG(
   RESH(230,45,"Rf",vv(r,"Rf","")) + W([[249,45],[290,45]]) + W([[290,45],[290,110]]) +
   W([[145,95],[145,141]]) + RESV(145,160,"Rg",vv(r,"Rg","")) +
   W([[145,179],[145,192]]) + GND(145,192) +
-  TX(268,150,"G = 1 + Rf / Rg \u2014 "+got(o,"Gain"),"middle","var(--ink3)",11), 400, 218),
+  TX(268,150,"G = 1 + Rf / Rg = "+gotv(o,"Gain"),"middle","var(--ink3)",11), 400, 218),
 
 opdiff: (r,o) => SVG(
   W([[16,85],[61,85]]) + NODE(16,76,"V1") +
@@ -2109,7 +2118,7 @@ buck: (r,o) => SVG(
   W([[180,50],[180,92]]) + DIOV_UP(180,100) + W([[180,108],[180,142]]) +
   W([[300,50],[300,96]]) + CAPV(300,100,"Cout",vv(r,"Cout","")) + W([[300,104],[300,142]]) +
   W([[60,50],[60,142]]) + W([[60,142],[300,142]]) + GND(180,142) +
-  TX(220,182,"D = Vout / Vin \u2014 "+got(o,"Duty cycle"),"middle","var(--ink3)",11), 400, 196),
+  TX(220,182,"D = Vout / Vin = "+gotv(o,"Duty cycle"),"middle","var(--ink3)",11), 400, 196),
 
 boost: (r,o) => SVG(
   W([[20,50],[62,50]]) + NODE(20,40,"Vin") + VAL(48,36,vv(r,"Vin",""),"middle") +
@@ -2121,7 +2130,7 @@ boost: (r,o) => SVG(
   TX(196,84,vv(r,"f","")+" Hz","start","var(--ink3)",10) +
   W([[300,50],[300,96]]) + CAPV(300,100,"Cout",vv(r,"Cout","")) + W([[300,104],[300,142]]) +
   W([[62,50],[62,142]]) + W([[62,142],[300,142]]) + GND(180,142) +
-  TX(220,182,"D = 1 \u2212 Vin / Vout \u2014 "+got(o,"Duty cycle"),"middle","var(--ink3)",11), 400, 196),
+  TX(220,182,"D = 1 \u2212 Vin / Vout = "+gotv(o,"Duty cycle"),"middle","var(--ink3)",11), 400, 196),
 
 shunt: (r,o) => SVG(
   ARROW(16,50,72,50, vv(r,"I","I")) + W([[72,50],[81,50]]) +
@@ -2503,6 +2512,39 @@ const DENS = {"Copper, pure":8.96, "Copper, annealed IEC":8.96, "Aluminium":2.70
 const awgDia = n => 0.127 * Math.pow(92, (36-n)/39);
 const awgArea = n => Math.PI*Math.pow(awgDia(n),2)/4;
 const AWG_NAME = n => n===-3?"4/0":n===-2?"3/0":n===-1?"2/0":n===0?"1/0":String(n);
+/* AWG 24 is 0.511 mm across and 0.205 mm² in section. Quoting the area on its
+   own invites reading it as the diameter - they are the two numbers a gauge
+   is known by, so both are given, and the ⌀ says which is which.          */
+const awgDesc = n => AWG_NAME(n)+"  ·  ⌀"+siFmt(awgDia(n),"mm")+"  ·  "+siFmt(awgArea(n),"mm²");
+/* resistance of a metre of copper at that gauge, from the same figures */
+const awgOhmPerM = n => RHO["Copper, pure"]/awgArea(n);
+
+/* The gauge table, computed rather than copied: every number here comes from
+   the defining series above and from copper's resistivity, so nothing can
+   drift out of step with what the calculators work out. Current ratings are
+   deliberately absent - those depend on insulation, bundling and ambient,
+   and a number invented here would be trusted.                            */
+function awgTableHTML(){
+  const rows = [];
+  for(let n=-3;n<=30;n++) rows.push(n);
+  const cell = n => `<tr><td class="m"><b>${AWG_NAME(n)}</b></td>
+      <td class="num m">${awgDia(n).toFixed(n<10?3:n<20?3:4)}</td>
+      <td class="num m">${awgArea(n) >= 1 ? awgArea(n).toFixed(2) : awgArea(n).toFixed(4)}</td>
+      <td class="num m">${siFmt(awgOhmPerM(n),"Ω")}</td></tr>`;
+  const half = Math.ceil(rows.length/2);
+  const table = list => `<table style="width:100%"><thead><tr><th>AWG</th>
+      <th class="num">⌀ mm</th><th class="num">mm²</th><th class="num">Ω/m</th></tr></thead>
+      <tbody>${list.map(cell).join("")}</tbody></table>`;
+  return `<h2>American wire gauge</h2>
+    <p>Diameter and section from the defining series — a gauge is quoted by both, and they are easy to
+       confuse: <b>AWG 24</b> is <b>0.511 mm</b> across and <b>0.205 mm²</b> in section. Ω/m is solid
+       copper at 20 °C; a run of cable is twice its length, out and back.</p>
+    <p style="color:var(--ink3);font-size:12px">No current rating is given. That depends on the
+       insulation, on whether the cable is bundled or in free air, and on the ambient — a single number
+       here would be believed and would sometimes be wrong.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0 22px;margin-top:10px">
+      ${table(rows.slice(0,half))}${table(rows.slice(half))}</div>`;
+}
 function awgFor(areaMM2){
   let best = null, bd = Infinity;
   for(let n=-3;n<=30;n++){
@@ -2530,7 +2572,7 @@ const WIRE_CALCS = [
                 R("Resistance",Rw,"\u03a9"),
                 R("Per metre",Rw/L,"\u03a9","\u03a9/m"),
                 R("Mass",(DENS[mat]||8.96)*A*L/1000,"kg","the whole length"),
-                R("Nearest AWG",null,"", AWG_NAME(awgFor(A))+"  \u00b7  "+siFmt(awgArea(awgFor(A)),"mm\u00b2")),
+                R("Nearest AWG",null,"", awgDesc(awgFor(A))),
                 R("The (L/D) \u00d7 \u03c1 formula gives",wrong,"\u03a9",
                   "wrong by "+(Rw/wrong).toFixed(2)+"\u00d7 \u2014 it treats a diameter as an area")];
    if(isFinite(Rm) && Rm>0){
@@ -2547,6 +2589,7 @@ const WIRE_CALCS = [
 
 {id:"cable", group:"Wire", name:"Cable size & voltage drop",
  note:"Sizing a run for a current and an acceptable drop. The length is one way; the calculation uses the round trip.",
+ ref: awgTableHTML,
  fields:[F("I","Current","A","32"),F("L","One way length","m","15"),F("V","System voltage","V","230"),
          F("drop","Allowed drop","%","3"),F("A","Or a cross section you already have","mm²","")],
  run(v){
@@ -2559,7 +2602,7 @@ const WIRE_CALCS = [
      const need = 2*rho*L*I/vd;
      const n = awgFor(need);
      out.push(R("Cross section needed",need,"mm\u00b2","for "+drop+" % at "+siFmt(V,"V")),
-              R("Nearest AWG",null,"", AWG_NAME(n)+"  \u00b7  "+siFmt(awgArea(n),"mm\u00b2")),
+              R("Nearest AWG",null,"", awgDesc(n)),
               R("Next metric size",null,"", [1,1.5,2.5,4,6,10,16,25,35,50,70,95].find(x=>x>=need)+" mm\u00b2"));
    }
    if(isFinite(A)&&A>0){
@@ -3240,7 +3283,8 @@ function viewCalc(){
         <span style="color:var(--ink3);font-size:12px">Engineering notation works: <span class="pn">4k7</span>
         <span class="pn">100n</span> <span class="pn">10u</span> <span class="pn">1M</span> — capital M is mega, small m is milli.</span></div>
     </div>
-    <div class="panel" id="calcOut">${calcDiagram(c)}${calcOutHTML(c)}</div>`;
+    <div class="panel" id="calcOut">${calcDiagram(c)}${calcOutHTML(c)}</div>
+    ${c.ref?`<div class="panel">${c.ref()}</div>`:""}`;
 }
 
 function viewDupes(){
