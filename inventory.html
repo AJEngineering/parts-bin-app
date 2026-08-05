@@ -2588,30 +2588,51 @@ const WIRE_CALCS = [
  }},
 
 {id:"cable", group:"Wire", name:"Cable size & voltage drop",
- note:"Sizing a run for a current and an acceptable drop. The length is one way; the calculation uses the round trip.",
+ note:"Sizing a run for a current and an acceptable drop. The length is one way; the calculation uses the round trip. Conductor temperature is asked for rather than assumed — copper gains about 0.39 % per degree, so a loaded cable drops more than a cold one. How hot it actually gets depends on the insulation, on whether the run is bundled or in free air, and on the ambient, so that is yours to say; the watts per metre below are what has to escape.",
  ref: awgTableHTML,
  fields:[F("I","Current","A","32"),F("L","One way length","m","15"),F("V","System voltage","V","230"),
-         F("drop","Allowed drop","%","3"),F("A","Or a cross section you already have","mm²","")],
+         F("drop","Allowed drop","%","3"),F("A","Or a cross section you already have","mm²",""),
+         F("T","Conductor temperature","°C","70")],
  run(v){
-   const {I,L,V,drop,A} = v;
+   const {I,L,V,drop,A,T} = v;
    if(!isFinite(I)||!isFinite(L)||I<=0||L<=0) return null;
    const rho = RHO["Copper, pure"];
+   /* Copper gains about 0.39 % per degree, so a warm cable drops more than a
+      cold one and the sum has to be done at the temperature the conductor
+      actually runs at - which is why it is asked for rather than assumed. */
+   const Tc = isFinite(T) ? T : 20;
+   const kT = 1 + 0.00393*(Tc-20);
    const out = [];
    if(isFinite(V)&&isFinite(drop)&&drop>0){
      const vd = V*drop/100;
      const need = 2*rho*L*I/vd;
      const n = awgFor(need);
-     out.push(R("Cross section needed",need,"mm\u00b2","for "+drop+" % at "+siFmt(V,"V")),
+     out.push(R("Allowed drop",vd,"V",drop+" % of "+siFmt(V,"V")),
+              R("Voltage at the load",V-vd,"V","if the cable is sized exactly to that"),
+              R("Cross section needed",need,"mm\u00b2","for "+drop+" % at "+siFmt(V,"V")),
               R("Nearest AWG",null,"", awgDesc(n)),
               R("Next metric size",null,"", [1,1.5,2.5,4,6,10,16,25,35,50,70,95].find(x=>x>=need)+" mm\u00b2"));
    }
    if(isFinite(A)&&A>0){
      const Rw = 2*rho*L/A, vd = Rw*I;
-     out.push(R("Loop resistance",Rw,"\u03a9"),
-              R("Drop at this current",vd,"V"),
-              R("Drop",isFinite(V)?100*vd/V:null,"%", isFinite(V)&&100*vd/V>3?"over the usual 3 % limit":""),
-              R("Heat in the cable",vd*I,"W"),
-              R("Resistance at 70 \u00b0C",Rw*(1+0.00393*50),"\u03a9","copper climbs about 0.39 % per degree"));
+     /* the drop is what the cable takes; the load only ever sees what is
+        left, and that is the number the thing on the end has to work on  */
+     const RwH = Rw*kT, vdH = RwH*I;
+     out.push(R("Loop resistance",Rw,"\u03a9","at 20 \u00b0C"),
+              R("Drop at this current",vd,"V","cold"),
+              R("Drop",isFinite(V)?100*vd/V:null,"%", isFinite(V)&&100*vd/V>3?"over the usual 3 % limit":""));
+     if(isFinite(V)) out.push(R("Voltage at the load",V-vd,"V",
+       V-vd<=0 ? "the cable eats the whole supply \u2014 the run is far too thin"
+               : "what the load actually receives with this cable fitted"));
+     /* at 20 \u00b0C the warm figures are the cold ones again - saying them twice
+        just buries the rows that differ                                    */
+     if(Math.abs(Tc-20) >= 1){
+       out.push(R("Loop resistance at "+siFmt(Tc,"")+" \u00b0C",RwH,"\u03a9","copper climbs about 0.39 % per degree"),
+                R("Drop when warm",vdH,"V","the case that matters \u2014 a loaded cable is not at 20 \u00b0C"));
+       if(isFinite(V)) out.push(R("Voltage at the load when warm",V-vdH,"V"));
+     }
+     out.push(R("Heat in the cable",vdH*I,"W","at "+siFmt(Tc,"")+" \u00b0C"),
+              R("Heat per metre",vdH*I/(2*L),"W","both legs counted \u2014 this is what has to escape"));
    }
    return out.length?out:null;
  }}
