@@ -317,7 +317,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "1.2.1";
+const APP_VERSION = "1.3.0";
 const REPO_URL = "https://github.com/AbdullahJalloul/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -1540,9 +1540,15 @@ const SI_IN = {p:1e-12, n:1e-9, u:1e-6, "\u00b5":1e-6, m:1e-3, R:1, r:1, E:1,
    it is metres, and the hint under the boxes says so; taking it as a unit
    would quietly turn 100m into a tenth of what was meant.                 */
 const UNIT_TAIL = /(?:\u00b0C\/W|mm\u00b2|\u00b0C|Hz|Ah|Wh|VA|oz|mm)$/;
-function parseSI(v){
-  const t = String(v==null?"":v).trim().replace(UNIT_TAIL,"")
-                                .replace(/[\s\u03a9FHAVWsC%\u00b0\u00d7\u00b2]/g,"");
+/* `unit` is the label on the field being read, and it settles the one case
+   nothing else can: the m in "15m". In a field measured in metres that is
+   fifteen metres; anywhere else it is fifteen thousandths. Knowing which
+   field asked is the only way to tell, so the field says.                */
+function parseSI(v, unit){
+  let s = String(v==null?"":v).trim();
+  const u = String(unit==null?"":unit).trim();
+  if(u && s.length > u.length && s.slice(-u.length) === u) s = s.slice(0, -u.length).trim();
+  const t = s.replace(UNIT_TAIL,"").replace(/[\s\u03a9FHAVWsC%\u00b0\u00d7\u00b2]/g,"");
   if(t==="") return NaN;
   const m = /^(-?\d*\.?\d*)([pnu\u00b5mRrEkKMGT])?(\d*)$/.exec(t);
   if(!m) return Number(t);
@@ -2614,11 +2620,15 @@ const WIRE_CALCS = [
    const out = [];
    if(isFinite(V)&&isFinite(drop)&&drop>0){
      const vd = V*drop/100;
-     const need = 2*rho*L*I/vd;
+     /* sized at the temperature the conductor runs at, not at 20 \u00b0C - a warm
+        cable is more resistive, so holding the same drop takes more copper,
+        and sizing it cold is how a run ends up marginal in service        */
+     const need = 2*(rho*kT)*L*I/vd;
      const n = awgFor(need);
      out.push(R("Allowed drop",vd,"V",drop+" % of "+siFmt(V,"V")),
               R("Voltage at the load",V-vd,"V","if the cable is sized exactly to that"),
-              R("Cross section needed",need,"mm\u00b2","for "+drop+" % at "+siFmt(V,"V")),
+              R("Cross section needed",need,"mm\u00b2","for "+drop+" % at "+siFmt(V,"V")+
+                (Math.abs(Tc-20)>=1 ? ", conductor at "+siFmt(Tc,"")+" \u00b0C" : "")),
               R("Nearest AWG",null,"", awgDesc(n)),
               R("Next metric size",null,"", [1,1.5,2.5,4,6,10,16,25,35,50,70,95].find(x=>x>=need)+" mm\u00b2"));
    }
@@ -2727,7 +2737,10 @@ DIAGRAMS.cable = (r,o) => SVG(
   ARROW(120,58,240,58,"") + TX(180,50,"L = "+vv(r,"L","")+" m one way","middle","var(--esd)",11) +
   ARROW(240,102,120,102,"") + TX(180,118,"return leg counts too","middle","var(--esd)",11) +
   BOX(314,58,66,44,"LOAD",vv(r,"I","")+" A") +
-  TX(200,148,"drop "+(got(o,"Drop at this current")||"\u2014")+
+  /* with no cross section given there is no measured drop, only the allowed
+     one - saying "drop \u2014" then reads as a failure rather than a question
+     that was never asked                                                  */
+  TX(200,148,"drop "+(got(o,"Drop at this current")||got(o,"Allowed drop")||"\u2014")+
              "   \u00b7   need "+(got(o,"Cross section needed")||"\u2014"),"middle","var(--kapton)",12) +
   TX(200,168,"AWG "+(got(o,"Nearest AWG")||"\u2014"),"middle","var(--ink3)",11),
   400, 182);
@@ -2892,7 +2905,7 @@ function calcRun(c){
   c.fields.forEach(f=>{
     if(f.t==="text") v[f.k] = String(raw[f.k]||"").trim();
     else if(f.t==="sel") v[f.k] = (raw[f.k]!==undefined && raw[f.k]!=="") ? raw[f.k] : (f.def||f.opts[0]);
-    else v[f.k] = parseSI(raw[f.k]);
+    else v[f.k] = parseSI(raw[f.k], f.unit);
   });
   try{ return c.run(v, raw); }catch(e){ return null; }
 }
@@ -3286,6 +3299,22 @@ function viewLabels(){
    is opened lands it on its own worked sum, which is also the quickest way to
    see what it is for. Done once per calculator: clearing a box afterwards
    leaves it cleared.                                                       */
+/* The boxes on one page are amps and metres; on the next they are farads and
+   hertz. A fixed line of examples describes none of them, so the hint is
+   built from the fields actually on screen - each distinct unit once, shown
+   on that field's own example value, which is what the box is expecting. */
+function calcUnitHints(c){
+  const seen = new Set(), out = [];
+  for(const f of c.fields){
+    if(f.t==="sel" || f.t==="text") continue;
+    const u = String(f.unit||"").trim();
+    if(!u || seen.has(u)) continue;
+    seen.add(u);
+    out.push((f.ph && /^[\d.]/.test(f.ph) ? f.ph : "10") + u);
+  }
+  return out;
+}
+
 function calcSeed(c){
   if(ui.calcVals[c.id]) return;
   const v = {};
@@ -3310,10 +3339,11 @@ function viewCalc(){
                  inputmode="text" spellcheck="false" autocomplete="off">`}</div>`).join("")}
       </div>
       <div class="sheetbar"><button class="btn ghost" id="calcClear">Clear</button>
-        <span style="color:var(--ink3);font-size:12px">Engineering notation works: <span class="pn">4k7</span>
-        <span class="pn">100n</span> <span class="pn">10u</span> <span class="pn">1M</span> — capital M is mega, small m is milli.
-        The unit may be typed with it: <span class="pn">65kHz</span> <span class="pn">40°C</span>
-        <span class="pn">3%</span> <span class="pn">0.3Ω</span>.</span></div>
+        <span style="color:var(--ink3);font-size:12px">${(()=>{ const u = calcUnitHints(c);
+          return u.length ? `This page takes ${u.map(x=>`<span class="pn">${esc(x)}</span>`).join(" ")}
+            — the unit is optional, and understood when it is there. ` : "";})()}Engineering
+        notation works: <span class="pn">4k7</span> <span class="pn">100n</span> <span class="pn">10u</span>
+        <span class="pn">1M</span> — capital M is mega, small m is milli.</span></div>
     </div>
     <div class="panel" id="calcOut">${calcDiagram(c)}${calcOutHTML(c)}</div>
     ${c.ref?`<div class="panel">${c.ref()}</div>`:""}`;
