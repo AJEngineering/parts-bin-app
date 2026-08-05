@@ -1532,8 +1532,17 @@ function lcscPrice(r){
    the decimal point, so 4k7 is 4700 and 1R2 is 1.2.                        */
 const SI_IN = {p:1e-12, n:1e-9, u:1e-6, "\u00b5":1e-6, m:1e-3, R:1, r:1, E:1,
                k:1e3, K:1e3, M:1e6, G:1e9, T:1e12};
+/* Units a field may be labelled with, longest first, so "\u00b0C/W" is taken off
+   before "\u00b0C" and "mm\u00b2" before "mm". Stripped only from the end: a unit in
+   the middle of a number is not a unit.
+
+   A bare trailing m is deliberately absent. It is milli far more often than
+   it is metres, and the hint under the boxes says so; taking it as a unit
+   would quietly turn 100m into a tenth of what was meant.                 */
+const UNIT_TAIL = /(?:\u00b0C\/W|mm\u00b2|\u00b0C|Hz|Ah|Wh|VA|oz|mm)$/;
 function parseSI(v){
-  const t = String(v==null?"":v).trim().replace(/[\s\u03a9FHAVWs]/g,"");
+  const t = String(v==null?"":v).trim().replace(UNIT_TAIL,"")
+                                .replace(/[\s\u03a9FHAVWsC%\u00b0\u00d7\u00b2]/g,"");
   if(t==="") return NaN;
   const m = /^(-?\d*\.?\d*)([pnu\u00b5mRrEkKMGT])?(\d*)$/.exec(t);
   if(!m) return Number(t);
@@ -3302,7 +3311,9 @@ function viewCalc(){
       </div>
       <div class="sheetbar"><button class="btn ghost" id="calcClear">Clear</button>
         <span style="color:var(--ink3);font-size:12px">Engineering notation works: <span class="pn">4k7</span>
-        <span class="pn">100n</span> <span class="pn">10u</span> <span class="pn">1M</span> — capital M is mega, small m is milli.</span></div>
+        <span class="pn">100n</span> <span class="pn">10u</span> <span class="pn">1M</span> — capital M is mega, small m is milli.
+        The unit may be typed with it: <span class="pn">65kHz</span> <span class="pn">40°C</span>
+        <span class="pn">3%</span> <span class="pn">0.3Ω</span>.</span></div>
     </div>
     <div class="panel" id="calcOut">${calcDiagram(c)}${calcOutHTML(c)}</div>
     ${c.ref?`<div class="panel">${c.ref()}</div>`:""}`;
