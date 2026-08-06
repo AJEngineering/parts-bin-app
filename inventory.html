@@ -1009,6 +1009,13 @@ const BOM_FORMS = {
     head:["Designator*","Quantity*","Manufacturer Part Number*","Manufacturer","Package/Footprint",
           "Description","Procurement Type","Customer Note"],
     row:o=>[o.ref, o.qty, o.mpn, o.mfr, o.pkg, o.desc, "", o.lcsc]},
+  /* JLCPCB is the odd one out and the easiest to satisfy: it asks for three
+     columns and matches the part from its own library by the LCSC code, which
+     is the one number every part in this bin already carries. Comment is
+     descriptive only - the code is what actually selects the part.        */
+  jlcpcb: {name:"JLCPCB",
+    head:["Comment","Designator","Footprint","LCSC Part #"],
+    row:o=>[o.val || o.mpn || o.desc, o.ref, o.pkg, o.lcsc]},
   pcbgogo: {name:"PCBGOGO",
     head:["Quantity","Designator","Description","Value","Footprint","Manufacturer","Part Number",
           "Buying Link as reference"],
@@ -3166,6 +3173,8 @@ function viewBom(){
       <p>A board house sources from the manufacturer's part number, not from a supplier code — a line carrying only
          <span class="pn">C1779</span> tells them nothing. Whatever is missing is read off LCSC first, then the file
          goes out with the columns each house asks for.</p>
+      <p><b>JLCPCB is the exception:</b> it picks the part out of its own library by the LCSC code, so for that one a
+         line needs the code and little else. The other three need the manufacturer's number.</p>
       <div class="kv">
         <b>lines</b><span>${rows.length}</span>
         <b>with a part number</b><span>${rows.filter(r=>bomOut(r).mpn).length}</span>
@@ -3174,6 +3183,7 @@ function viewBom(){
       <div class="sheetbar" style="margin-top:10px;flex-wrap:wrap">
         <button class="btn ghost" id="bomFillMpn"${bomGaps().length?"":" disabled"}>Fill ${bomGaps().length} part numbers from LCSC</button>
         <span class="grow"></span>
+        <button class="btn" id="bomCsvJlcpcb">JLCPCB</button>
         <button class="btn" id="bomCsvPcbway">PCBWay</button>
         <button class="btn" id="bomCsvNextpcb">NextPCB</button>
         <button class="btn" id="bomCsvPcbgogo">PCBGOGO</button>
@@ -4142,10 +4152,10 @@ document.addEventListener("click", async ev=>{
 
   if(t.id==="bomFillMpn"){ t.disabled = true; await bomFillMpn(); return; }
   if(t.id==="bomFillHalt"){ bomFillStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
-  if(t.id==="bomCsvPcbway" || t.id==="bomCsvNextpcb" || t.id==="bomCsvPcbgogo"){
+  if(/^bomCsv(Jlcpcb|Pcbway|Nextpcb|Pcbgogo)$/.test(t.id||"")){
     const rows = ui.bomRows || [];
     if(!rows.length) return toast("Check a BOM against the bin first");
-    const vendor = t.id==="bomCsvPcbway" ? "pcbway" : t.id==="bomCsvNextpcb" ? "nextpcb" : "pcbgogo";
+    const vendor = t.id.replace("bomCsv","").toLowerCase();
     const name = (ui.bomName||"bom").trim().replace(/[^\w.-]+/g,"-").replace(/^-|-$/g,"") || "bom";
     download(name+"-"+vendor+".xlsx", bomXlsx(vendor));
     const noPn = rows.filter(r=>!bomOut(r).mpn).length;
