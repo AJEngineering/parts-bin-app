@@ -3063,7 +3063,13 @@ function viewFirstRun(){
       <p>Add parts by hand and push them up when you are ready. The calculators work without any data at all.</p>
       <div class="sheetbar"><button class="btn ghost" id="addBtn">Add the first part</button>
         <button class="btn ghost" data-view-go="calc">Open the calculators</button></div>
-    </div>`;
+    </div>
+    ${IS_FILE_URL ? "" : `<div class="panel"><h2>Just looking?</h2>
+      <p>A small made-up bin — a few dozen parts across the usual shelves, some of them low, one saved board —
+         enough to see what every tab does without typing anything in. It goes no further than this browser, and
+         nothing is written to a file or a repository.</p>
+      <div class="sheetbar"><button class="btn" id="loadExample">Load the example bin</button></div>
+    </div>`}`;
 }
 
 function viewParts(){
@@ -4315,6 +4321,25 @@ document.addEventListener("click", async ev=>{
   }
   if(t.id==="clearChip"){ ui.low=false; ui.box=""; ui.cat=""; ui.mfr=""; ui.q=""; $("#q").value=""; render(); return; }
   if(t.id==="addBtn" || t.id==="addBtn2"){ openEditor(null); return; }
+
+  /* Only offered from the first-run screen, which only appears when the bin
+     is empty - so this can never land on top of anyone's real inventory.  */
+  if(t.id==="loadExample"){
+    t.disabled = true;
+    try{
+      const r = await fetch("example-components.json", {cache:"no-store"});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      const next = JSON.parse(await r.text());
+      if(!next || !Array.isArray(next.parts) || !next.parts.length) throw new Error("no parts in it");
+      db = normalize(next);
+      save(); render();
+      toast(db.parts.length+" example parts loaded — this browser only");
+    }catch(e){
+      t.disabled = false;
+      toast("Could not load the example: "+e.message);
+    }
+    return;
+  }
 
   if(t.id==="catAdd"){
     const v = ($("#newCatField").value||"").trim();
