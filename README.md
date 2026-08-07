@@ -6,7 +6,13 @@ No server, no build step, no account, no dependencies. Open `inventory.html` in 
 works — from a hard disk, from a USB stick, or from any address you serve it at. Type an LCSC part
 code and the rest of the part fills itself in.
 
-![The parts list](docs/Parts.png)
+### ▶ [Try it in your browser](https://abdullahjalloul.github.io/parts-bin-app/)
+
+Nothing to install and nothing to sign up for. Press **Load the example bin** on the opening screen
+and there is a made-up inventory to poke at — it goes no further than your browser, and your own
+data is never involved.
+
+[![The parts list](docs/Parts.png)](https://abdullahjalloul.github.io/parts-bin-app/)
 
 **MIT licensed** — use it, change it, build on it, sell what you make with it. Just keep the
 copyright notice with the copies you pass on.
@@ -27,6 +33,9 @@ It is deliberately small and deliberately boring: one file of plain HTML, CSS an
 no framework and nothing to keep up to date.
 
 ## Quick start
+
+To keep an inventory rather than just look at one, run your own copy — the hosted page is fine for
+that too, but the file is yours and needs nothing from anybody.
 
 1. Download [`inventory.html`](../../releases/latest) — or clone the repo and open the file.
 2. Open it in a browser.
