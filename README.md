@@ -163,10 +163,15 @@ that footprint.
 
 ### Sending it to a board house
 
-**Send it to a fab** exports the checked BOM for **PCBWay**, **NextPCB** or **PCBGOGO**. The column
-headings are taken from each house's own template, so the file goes up without being rearranged
-first — NextPCB stars its required columns, PCBGOGO leads with the quantity and asks for a buying
-link, which is filled with the part's LCSC page.
+**Send it to a fab** exports the checked BOM for **JLCPCB**, **PCBWay**, **NextPCB** or **PCBGOGO**.
+The column headings are taken from each house's own template, so the file goes up without being
+rearranged first — NextPCB stars its required columns, PCBGOGO leads with the quantity and asks for
+a buying link, which is filled with the part's LCSC page.
+
+JLCPCB is the exception and the easiest of the four: it wants `Comment`, `Designator`, `Footprint`
+and `LCSC Part #`, and picks the part out of its own library by that code — which is the one number
+every part in this bin already carries. The other three source from the manufacturer's part number,
+so for those a line holding only a supplier code has to be filled in first.
 
 Files are written as real **`.xlsx`** workbooks, not CSV. A CSV is read back by Excel as numbers,
 and `0402` loses its leading zero the moment the fab opens it; in a sheet the cell stays text.
