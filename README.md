@@ -122,8 +122,66 @@ none and never will.
 LCSC serves this data to anyone but does not send an `Access-Control-Allow-Origin` header, so a
 browser will not hand the reply to a page at another address. The request therefore travels through
 a relay. That is already arranged and needs nothing from you — **Data → Test it on C1779** names
-whichever relay answered. If one ever goes quiet, you can paste a stand-in without editing the
-file. A relay only ever sees the part code being looked up.
+whichever relay answered. A relay only ever sees the part code being looked up.
+
+The [hosted demo](https://abdullahjalloul.github.io/parts-bin-app/) uses a relay of the project's
+own, so that trying it works first time. A copy you download falls back to free public relays,
+which are slower and go quiet now and then.
+
+### A relay of your own
+
+If you are going to rely on this, five minutes and a free Cloudflare account gets you one that is
+never busy — and it unlocks the better part-number search, because it can forward a `POST`.
+
+Make a Worker at **Workers & Pages → Create → Create Worker**, paste this, deploy:
+
+```js
+export default {
+  async fetch(req) {
+    const cors = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type,Accept",
+      "Access-Control-Max-Age": "86400"
+    };
+    if (req.method === "OPTIONS") return new Response(null, { headers: cors });
+
+    const target = new URL(req.url).searchParams.get("url");
+    if (!target) return new Response("missing url", { status: 400, headers: cors });
+
+    // Only these hosts. An open proxy is found and abused within days.
+    let host;
+    try { host = new URL(target).hostname; }
+    catch { return new Response("bad url", { status: 400, headers: cors }); }
+    if (!["wmsc.lcsc.com", "www.lcsc.com", "jlcpcb.com"].includes(host))
+      return new Response("host not allowed", { status: 403, headers: cors });
+
+    const init = {
+      method: req.method,
+      headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                 "Referer": "https://www.lcsc.com/" }
+    };
+    if (req.method === "POST") {
+      init.body = await req.text();
+      init.headers["Content-Type"] = "application/json";
+    }
+    const r = await fetch(target, init);
+    return new Response(await r.arrayBuffer(), {
+      status: r.status,
+      headers: { ...cors, "Content-Type": r.headers.get("content-type") || "application/json" }
+    });
+  }
+};
+```
+
+Then put its address into **Data → If the lookup ever stops working**, with `{url}` on the end:
+
+```
+https://your-worker.your-name.workers.dev/?url={url}
+```
+
+**Test it on C1779** should answer *“answered by your relay”*. The free tier is 100,000 requests a
+day, which no bench will come close to.
 
 > **LCSC's own search is unreliable, and that is not this program failing.** It answers
 > `0402WGF1002TCE` with no results while that part sits in their catalogue as `C25744`. When a

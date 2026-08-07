@@ -317,7 +317,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 const REPO_URL = "https://github.com/AbdullahJalloul/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -1164,6 +1164,18 @@ const LCSC_PUBLIC = [["reader", "https://r.jina.ai/", true],
                      ["codetabs", "https://api.codetabs.com/v1/proxy?quest={url}", false],
                      ["allorigins", "https://api.allorigins.win/raw?url={url}", false]];
 let lcscVia = "";           /* which route answered last, for the Data panel */
+/* The hosted demo carries a relay of its own, because a first visit that
+   fails is a first visit lost - and the free public ones hand back a
+   truncated page often enough to lose several. It applies to that one
+   address and nowhere else: a copy downloaded and opened, or a fork hosted
+   somewhere else, uses the public relays like everybody, because nobody's
+   lookups should quietly run through an account that is not theirs. Setting
+   your own under Data overrides it either way.                            */
+const DEMO_HOST  = "abdullahjalloul.github.io";
+const DEMO_RELAY = "https://lcsc-relay.abdullah-md-jalloul.workers.dev/?url={url}";
+const onDemo   = () => location.hostname === DEMO_HOST;
+const demoRelay = () => (onDemo() && !lcsc.relay) ? DEMO_RELAY : "";
+
 const lcsc = {relay:"", auto:true, public:true};
 function lcscLoad(){ try{ const t=localStorage.getItem(LCSC_KEY); if(t) Object.assign(lcsc, JSON.parse(t)); }catch(e){} }
 function lcscSave(){ try{ localStorage.setItem(LCSC_KEY, JSON.stringify(lcsc)); }catch(e){} }
@@ -1232,6 +1244,7 @@ async function lcscOne(tpl, code, ms){
 async function lcscFetch(code){
   const routes = [["direct",""]]
     .concat(lcsc.relay?[["your relay", lcsc.relay]]:[])
+    .concat(demoRelay()?[["the demo relay", demoRelay()]]:[])
     .concat(lcsc.public?LCSC_PUBLIC:[]);
   const failed = [];
   lcscVia = "";
@@ -1475,6 +1488,7 @@ const mpnKey = s => String(s||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
 async function lcscTextFrom(url, ms, routes){
   routes = routes || [["direct",""]]
     .concat(lcsc.relay?[["your relay", lcsc.relay]]:[])
+    .concat(demoRelay()?[["the demo relay", demoRelay()]]:[])
     .concat(lcsc.public?LCSC_PUBLIC:[]);
   const failed = [];
   for(const [name,tpl] of routes){
@@ -1496,22 +1510,64 @@ async function lcscTextFrom(url, ms, routes){
   throw new Error("no route worked — "+failed.join("; "));
 }
 
+/* JLCPCB search the same catalogue from the other end, and they find part
+   numbers LCSC's own search box denies exist: 0402WGF1002TCE comes back as
+   C25744 here and as nothing at all there. It answers structured JSON rather
+   than a page that has to be rendered and read, so it is both quicker and
+   surer - but it is a POST, and a relay has to be willing to forward one.
+   The public relays are not; a Worker of your own is.                     */
+const JLC_SEARCH = "https://jlcpcb.com/api/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList";
+async function lcscFindJlc(mpn, ms){
+  const relay = lcsc.relay || demoRelay();
+  if(!relay) return null;
+  const ctl = new AbortController();
+  const timer = setTimeout(()=>ctl.abort(), ms||12000);
+  try{
+    const r = await fetch(lcscRoute(relay, JLC_SEARCH), {
+      method:"POST", signal:ctl.signal,
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({keyword:mpn, currentPage:1, pageSize:8})
+    });
+    if(!r.ok) return null;
+    const d = JSON.parse(await r.text());
+    const list = d && d.data && d.data.componentPageInfo && d.data.componentPageInfo.list;
+    if(!Array.isArray(list)) return null;
+    const codes = [];
+    for(const it of list){
+      const c = lcscCode(it.componentCode || "");
+      if(c && codes.indexOf(c) < 0) codes.push(c);
+      if(codes.length >= 4) break;
+    }
+    return codes.length ? codes : null;
+  }catch(e){ return null; }
+  finally{ clearTimeout(timer); }
+}
+
 async function lcscFind(mpn){
-  const renderers = (lcsc.public?LCSC_PUBLIC:[]).filter(r=>r[2]);
-  if(!renderers.length)
-    throw new Error("searching by part number needs a relay that renders the page, and the built-in ones are switched off under Data");
-  const text = await lcscTextFrom(LCSC_SEARCH+encodeURIComponent(mpn), 30000, renderers);
-  /* "0 results" is LCSC's search talking, and it is not to be believed: it
-     answers 0402WGF1002TCE with nothing at all, while the part sits in the
-     catalogue as C25744. Say what actually happened and let the person judge. */
-  if(/\b0 results\b/i.test(text) && !/product-detail\/C\d+\.html/.test(text))
-    throw new Error("LCSC's own search found nothing for "+mpn+" — which it also does for parts it stocks, so this is not proof it has none");
-  const codes = [];
-  const rx = /product-detail\/(C\d+)\.html/g;
-  let m;
-  while((m = rx.exec(text)) !== null && codes.length < 4)
-    if(codes.indexOf(m[1])<0) codes.push(m[1]);
-  if(!codes.length) throw new Error("nothing on that page looked like a part");
+  /* the better source first, when there is a relay that can reach it */
+  let codes = await lcscFindJlc(mpn);
+
+  if(!codes){
+    const renderers = (lcsc.public?LCSC_PUBLIC:[]).filter(r=>r[2]);
+    if(!renderers.length)
+      throw new Error("searching by part number needs either a relay of your own or one of the built-in ones, and neither is available");
+    const text = await lcscTextFrom(LCSC_SEARCH+encodeURIComponent(mpn), 30000, renderers);
+    /* "0 results" is LCSC's search talking, and it is not to be believed: it
+       answers 0402WGF1002TCE with nothing at all, while the part sits in the
+       catalogue as C25744. Say what happened and let the person judge.     */
+    if(/\b0 results\b/i.test(text) && !/product-detail\/C\d+\.html/.test(text))
+      throw new Error("LCSC's own search found nothing for "+mpn+" — which it also does for parts it stocks, so this is not proof it has none");
+    codes = [];
+    const rx = /product-detail\/(C\d+)\.html/g;
+    let m;
+    while((m = rx.exec(text)) !== null && codes.length < 4)
+      if(codes.indexOf(m[1])<0) codes.push(m[1]);
+    if(!codes.length) throw new Error("nothing on that page looked like a part");
+  }
+
+  /* whichever found them, every candidate is read back and its real part
+     number compared - JLCPCB return near neighbours too, answering
+     SRN4018-220M with NRSE4018-220M, which is not the same part          */
   const want = mpnKey(mpn), out = [];
   for(const c of codes){
     try{
@@ -3514,7 +3570,13 @@ function viewData(){
         <button class="btn ghost" id="lcscBulkScan"${gaps?"":" disabled"}>Read ${gaps} parts off LCSC</button>
       </div>
       <div id="lcscBulkWork"></div>
-      <details style="margin-top:12px">
+      ${demoRelay()?`<p style="border-left:3px solid var(--kapton);padding-left:11px">This page is the project's own
+         demo, and it is using a relay the project pays for, so that trying it out works first time. A copy you
+         download does not — it falls back to the free public relays, which are slower and go quiet now and then.
+         If you are going to use this for real, five minutes and a free Cloudflare account gets you one of your own;
+         the code for it is in the <a class="linkish" target="_blank" rel="noreferrer" href="${esc(REPO_URL)}#about-the-relay">readme</a>,
+         and it goes in the box below.</p>`:""}
+      <details style="margin-top:12px"${demoRelay()?"":""}>
         <summary style="cursor:pointer;color:var(--ink2);font-size:12.5px">If the lookup ever stops working</summary>
         <p>The relays are free services and one may go quiet. Any stand-in can be pasted here without touching the
            file — write <span class="pn">{url}</span> where the address should go.</p>
