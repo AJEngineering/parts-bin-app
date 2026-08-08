@@ -77,10 +77,10 @@ Type an LCSC code (`C1779`) into the part editor and press **Fetch** — or just
 it looks the part up on its own. The manufacturer part number, manufacturer, package, value,
 description and category are read straight off LCSC.
 
-![Adding a part, filled in from its LCSC code](docs/AddPart.png)
+![A part filled in from its LCSC code](docs/AddPart.png)
 
-*Amber marks what the lookup just filled in. The line underneath reports the stock, the price and
-the datasheet — none of which is written into your bin, it is there to tell you whether the part is
+*Amber marks what the lookup just filled in, datasheet included. The stock and the price on the
+line underneath are not written into your bin — they are there to tell you whether the part is
 still worth ordering.*
 
 - **Only empty fields are filled.** Anything you have already written is left exactly as it is, and
