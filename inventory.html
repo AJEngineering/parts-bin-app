@@ -129,6 +129,11 @@ tr[data-catrow].dropbelow td{box-shadow:inset 0 -2px 0 var(--kapton)}
 .line1{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
 .pn{font-family:var(--mono);font-size:13.5px;font-weight:600}
 .lcsc{font-family:var(--mono);font-size:11px;color:#fff;background:var(--ink2);padding:1px 5px;border-radius:2px}
+.ds{font-family:var(--label);text-transform:uppercase;letter-spacing:.08em;font-weight:700;font-size:9.5px;
+    color:var(--esd);border:1px solid var(--esd);padding:1px 5px;border-radius:2px;text-decoration:none}
+.ds:hover{background:var(--esd);color:#fff}
+.ds.none{color:var(--ink3);border-color:var(--rule)}      /* nothing saved: the product page instead */
+.ds.none:hover{background:var(--ink3);color:#fff;border-color:var(--ink3)}
 .mfrtag{font-family:var(--label);text-transform:uppercase;letter-spacing:.08em;font-weight:700;font-size:10.5px;
         color:var(--esd);border:1px solid var(--esd);background:var(--esd-soft);padding:1px 6px;border-radius:2px}
 .mfrtag:hover{background:var(--esd);color:#fff}
@@ -317,7 +322,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.6.0";
 const REPO_URL = "https://github.com/AbdullahJalloul/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -1362,6 +1367,9 @@ function lcscMap(r){
           val:  lcscValue(r),
           desc: String(r.productIntroEn||r.productDescEn||"").trim().replace(/\s+RoHS$/i,""),
           cat:  lcscCategory(r),
+          /* the datasheet arrives with every lookup and used to be shown once
+             and thrown away; keeping it is the whole cost of the feature   */
+          ds:   String(r.pdfUrl||"").trim(),
           src:  "LCSC"};
 }
 /* -------------------------------------------- filling many parts at once --
@@ -1374,8 +1382,8 @@ function lcscMap(r){
    or a MOSFET has no value and never will, so asking again every time would
    burn a request per part forever. Only the fields LCSC always answers with
    decide whether a part is worth asking about.                              */
-const LCSC_GAP_KEYS  = ["mpn","mfr","pkg","desc","cat"];
-const LCSC_FILL_KEYS = ["mpn","mfr","pkg","val","desc","cat","src"];
+const LCSC_GAP_KEYS  = ["mpn","mfr","pkg","desc","cat","ds"];
+const LCSC_FILL_KEYS = ["mpn","mfr","pkg","val","desc","cat","src","ds"];
 function lcscGapList(){
   return db.parts.filter(p => lcscCode(p.lcsc) &&
     LCSC_GAP_KEYS.some(k => !String(p[k]||"").trim()));
@@ -3076,6 +3084,20 @@ function renderRail(){
   $("#clearChip").classList.toggle("on", anyFilter() || !!ui.q);
 }
 
+/* The datasheet, or the next best thing. LCSC's own URLs carry a hash of the
+   file, so a saved one dies the day they re-upload it - but the product page
+   can always be worked out from the code, and that page has the current
+   datasheet on it. A row is never left with no way through to the paper. */
+function dsLink(p){
+  const ds = String(p.ds||"").trim();
+  if(ds) return `<a class="ds" href="${esc(ds)}" target="_blank" rel="noreferrer"
+    title="datasheet" onclick="event.stopPropagation()">PDF</a>`;
+  const code = lcscCode(p.lcsc);
+  if(code) return `<a class="ds none" href="${esc(lcscPage(code))}" target="_blank" rel="noreferrer"
+    title="no datasheet saved — open the part on lcsc.com" onclick="event.stopPropagation()">LCSC</a>`;
+  return "";
+}
+
 function rowHTML(p){
   const toks = partBoxes(p);
   const key  = toks.length? toks.map(t=>t.key).join("+") : "—";
@@ -3090,6 +3112,7 @@ function rowHTML(p){
         ${p.lcsc?`<span class="lcsc">${esc(p.lcsc)}</span>`:""}
         ${p.val?`<span class="val">${esc(p.val)}</span>`:""}
         ${mfr}
+        ${dsLink(p)}
       </div>
       <div class="line2">${bits.map(b=>`<em>${esc(b)}</em>`).join('<span class="dot">·</span>')}</div>
     </div>
@@ -3764,7 +3787,7 @@ function openEditor(p, seed){
   const isNew = !p;
   const s = seed || {};
   const d = p || {id:0,cat:s.cat||ui.cat||db.categories[0],lcsc:"",mpn:"",val:"",pkg:"",qty:0,min:null,
-                  box:s.box||ui.box||"",desc:"",src:""};
+                  box:s.box||ui.box||"",desc:"",src:"",ds:""};
   $("#overlay").hidden = false;
   $("#overlay").innerHTML = `<form class="sheet" id="sheet" data-new="${isNew?1:0}" data-opencat="${esc(d.cat||"")}">
     <h2>${isNew?"Add part":"Edit part"}</h2>
@@ -3789,6 +3812,9 @@ function openEditor(p, seed){
       <div class="f"><label class="lab">Quantity</label><input name="qty" type="number" step="1" min="0" value="${Number(d.qty||0)}"></div>
       <div class="f"><label class="lab">Alert below</label><input name="min" type="number" step="1" min="0" value="${d.min==null?"":d.min}" placeholder="2"><small>empty = 2</small></div>
       <div class="f wide"><label class="lab">Description</label><input name="desc" value="${esc(d.desc)}"></div>
+      <div class="f wide"><label class="lab">Datasheet</label>
+        <input name="ds" value="${esc(d.ds||"")}" placeholder="filled in by the LCSC lookup — or paste one" spellcheck="false">
+        <small>${d.ds?`<a class="linkish" target="_blank" rel="noreferrer" href="${esc(d.ds)}">open it</a>`:"&nbsp;"}</small></div>
     </div>
     <div class="sheetbar">
       <button class="btn" type="submit">${isNew?"Add part":"Save changes"}</button>
@@ -3809,7 +3835,8 @@ function openEditor(p, seed){
       if(!db.categories.includes(cat)) db.categories.push(cat);
     }
     const rec = {cat:cat, lcsc:get("lcsc").toUpperCase(), mpn:get("mpn"), val:get("val"),
-                 pkg:padPkg(get("pkg")), mfr:get("mfr"), box:get("box").toUpperCase(), desc:get("desc"), src:get("src"),
+                 pkg:padPkg(get("pkg")), mfr:get("mfr"), box:get("box").toUpperCase(), desc:get("desc"),
+                 src:get("src"), ds:get("ds"),
                  qty:Number(f.get("qty")||0), min:get("min")===""?null:Number(f.get("min"))};
     if(isNew){
       rec.id = 1+db.parts.reduce((m,p)=>Math.max(m,p.id),0);
@@ -3886,7 +3913,8 @@ function closeEditor(){ $("#overlay").hidden = true; $("#overlay").innerHTML="";
    per field, because a bin's own wording for a value is usually the wording
    its owner wants to keep.                                                  */
 const LCSC_FIELDS = [["mpn","part number"],["mfr","manufacturer"],["pkg","package"],
-                     ["val","value"],["desc","description"],["cat","category"],["src","supplier"]];
+                     ["val","value"],["desc","description"],["cat","category"],["src","supplier"],
+                     ["ds","datasheet"]];
 
 async function lcscFill(){
   const form = $("#sheet"); if(!form) return;
@@ -4146,7 +4174,7 @@ function xlsxBlob(sheetName, rows){
   ]);
 }
 function toCsv(){
-  const cols = ["cat","mfr","lcsc","mpn","val","pkg","qty","min","box","desc","src"];
+  const cols = ["cat","mfr","lcsc","mpn","val","pkg","qty","min","box","desc","src","ds"];
   const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
   return [cols.join(",")].concat(db.parts.map(p=>cols.map(c=>q(p[c])).join(","))).join("\r\n");
 }
@@ -4794,7 +4822,7 @@ function normalize(d){
     id: Number(p.id||i+1), cat:p.cat||"", lcsc:(p.lcsc||"").toUpperCase(), mpn:p.mpn||"",
     val:p.val||"", pkg:padPkg(p.pkg), mfr:p.mfr||"", qty:Number(p.qty||0),
     min:(p.min===null||p.min===undefined||p.min==="")?null:Number(p.min),
-    box:(p.box||"").toUpperCase(), desc:p.desc||"", src:p.src||""
+    box:(p.box||"").toUpperCase(), desc:p.desc||"", src:p.src||"", ds:p.ds||""
   }));
   const cats = new Set(d.categories||[]);
   d.parts.forEach(p=>{ if(p.cat) cats.add(p.cat); });
