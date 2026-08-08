@@ -183,10 +183,12 @@ https://your-worker.your-name.workers.dev/?url={url}
 **Test it on C1779** should answer *“answered by your relay”*. The free tier is 100,000 requests a
 day, which no bench will come close to.
 
-> **LCSC's own search is unreliable, and that is not this program failing.** It answers
-> `0402WGF1002TCE` with no results while that part sits in their catalogue as `C25744`. When a
-> part-number search comes up empty the message says so plainly rather than claiming the part does
-> not exist — entering the code directly always works.
+> **Why part-number search prefers JLCPCB.** LCSC have no search endpoint open to anyone else, so
+> the only way in is to render their search page and read the links off it — and a page assembled
+> in the browser is a poor thing to scrape, since the relay hands back whatever it looked like when
+> it stopped waiting. JLCPCB index the same catalogue and answer in JSON, which has no such failure
+> mode. When a search does come back empty the message says the page may have been read too early,
+> rather than claiming the part does not exist. Entering the code directly always works.
 
 ## Boxes and drawers
 

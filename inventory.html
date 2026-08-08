@@ -1519,12 +1519,16 @@ async function lcscTextFrom(url, ms, routes){
   throw new Error("no route worked — "+failed.join("; "));
 }
 
-/* JLCPCB search the same catalogue from the other end, and they find part
-   numbers LCSC's own search box denies exist: 0402WGF1002TCE comes back as
-   C25744 here and as nothing at all there. It answers structured JSON rather
-   than a page that has to be rendered and read, so it is both quicker and
-   surer - but it is a POST, and a relay has to be willing to forward one.
-   The public relays are not; a Worker of your own is.                     */
+/* JLCPCB search the same catalogue and answer in structured JSON. LCSC have
+   no such endpoint open to anyone else - theirs is behind a bot filter - so
+   the only way in is to render their search page and read the links off it,
+   and a page assembled in the browser is a poor thing to scrape: the relay
+   doing the rendering hands back whatever the page looked like when it
+   stopped waiting, which is sometimes the results and sometimes the empty
+   frame they load into. JSON does not have that failure mode.
+
+   The catch is that it is a POST, and a relay has to be willing to forward
+   one. The public ones are not; a Worker of your own is.                  */
 const JLC_SEARCH = "https://jlcpcb.com/api/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList";
 async function lcscFindJlc(mpn, ms){
   const relay = lcsc.relay || demoRelay();
@@ -1561,11 +1565,11 @@ async function lcscFind(mpn){
     if(!renderers.length)
       throw new Error("searching by part number needs either a relay of your own or one of the built-in ones, and neither is available");
     const text = await lcscTextFrom(LCSC_SEARCH+encodeURIComponent(mpn), 30000, renderers);
-    /* "0 results" is LCSC's search talking, and it is not to be believed: it
-       answers 0402WGF1002TCE with nothing at all, while the part sits in the
-       catalogue as C25744. Say what happened and let the person judge.     */
+    /* "0 results" is what their page says while it is still fetching, so
+       seeing it here means the render was read too early just as often as it
+       means the part is absent. Do not report it as an answer.            */
     if(/\b0 results\b/i.test(text) && !/product-detail\/C\d+\.html/.test(text))
-      throw new Error("LCSC's own search found nothing for "+mpn+" — which it also does for parts it stocks, so this is not proof it has none");
+      throw new Error("the search page came back before its results had loaded — try again, or open "+mpn+" on lcsc.com and put the code in directly");
     codes = [];
     const rx = /product-detail\/(C\d+)\.html/g;
     let m;
