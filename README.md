@@ -6,13 +6,13 @@ No server, no build step, no account, no dependencies. Open `inventory.html` in 
 works — from a hard disk, from a USB stick, or from any address you serve it at. Type an LCSC part
 code and the rest of the part fills itself in.
 
-### ▶ [Try it in your browser](https://abdullahjalloul.github.io/parts-bin-app/)
+### ▶ [Try it in your browser](https://ajengineering.github.io/parts-bin-app/)
 
 Nothing to install and nothing to sign up for. Press **Load the example bin** on the opening screen
 and there is a made-up inventory to poke at — it goes no further than your browser, and your own
 data is never involved.
 
-[![The parts list](docs/Parts.png)](https://abdullahjalloul.github.io/parts-bin-app/)
+[![The parts list](docs/Parts.png)](https://ajengineering.github.io/parts-bin-app/)
 
 **MIT licensed** — use it, change it, build on it, sell what you make with it. Just keep the
 copyright notice with the copies you pass on.
@@ -124,7 +124,7 @@ browser will not hand the reply to a page at another address. The request theref
 a relay. That is already arranged and needs nothing from you — **Data → Test it on C1779** names
 whichever relay answered. A relay only ever sees the part code being looked up.
 
-The [hosted demo](https://abdullahjalloul.github.io/parts-bin-app/) uses a relay of the project's
+The [hosted demo](https://ajengineering.github.io/parts-bin-app/) uses a relay of the project's
 own, so that trying it works first time. A copy you download falls back to free public relays,
 which are slower and go quiet now and then.
 

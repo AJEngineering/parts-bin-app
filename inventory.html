@@ -323,7 +323,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
 const APP_VERSION = "1.6.0";
-const REPO_URL = "https://github.com/AbdullahJalloul/parts-bin-app";
+const REPO_URL = "https://github.com/AJEngineering/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
 let db = null;
@@ -1177,7 +1177,7 @@ let lcscVia = "";           /* which route answered last, for the Data panel */
    somewhere else, uses the public relays like everybody, because nobody's
    lookups should quietly run through an account that is not theirs. Setting
    your own under Data overrides it either way.                            */
-const DEMO_HOST  = "abdullahjalloul.github.io";
+const DEMO_HOST  = "ajengineering.github.io";
 const DEMO_RELAY = "https://lcsc-relay.abdullah-md-jalloul.workers.dev/?url={url}";
 const onDemo   = () => location.hostname === DEMO_HOST;
 const demoRelay = () => (onDemo() && !lcsc.relay) ? DEMO_RELAY : "";
