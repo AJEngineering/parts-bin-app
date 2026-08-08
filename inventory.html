@@ -1086,13 +1086,14 @@ function buildOrder(){
   (ui.bomRows||[]).filter(r=>r.short>0).forEach(r=>{
     const key = (r.part && r.part.id) || ("bom:"+(r.mpn||r.lcsc||r.val));
     add(key, {lcsc:(r.part&&r.part.lcsc)||r.lcsc||"", mpn:(r.part&&r.part.mpn)||r.mpn||r.val||"",
+              val:(r.part&&r.part.val)||r.val||"",
               cat:(r.part&&r.part.cat)||"", qty:r.short, why:"BOM"});
   });
   db.parts.filter(isLow).forEach(p=>{
     /* top the shelf back up to twice the alert level, at least 10 pieces */
     const target = Math.max(minOf(p)*2, 10);
     const q = Math.max(1, Math.ceil(target - Number(p.qty||0)));
-    add(p.id, {lcsc:p.lcsc||"", mpn:p.mpn||"", cat:p.cat, qty:q, why:"low stock"});
+    add(p.id, {lcsc:p.lcsc||"", mpn:p.mpn||"", val:p.val||"", cat:p.cat, qty:q, why:"low stock"});
   });
   return [...rows.values()].sort((a,b)=> a.why.localeCompare(b.why) || (a.cat||"").localeCompare(b.cat||""));
 }
@@ -3302,7 +3303,7 @@ function viewBom(){
         ? "A line matches its own part number or LCSC code, or not at all — the shelf is never searched by value. Use <b>Fill part numbers from LCSC</b> below to give the numberless lines one."
         : "A line with no part number falls back to value and package. That reads 4.7uF as 4.7uF whether it is rated 25V or 50V, so check the wording shown in amber."}</span>
     </div>
-    <table><thead><tr><th>Line</th><th>Matched</th><th>How</th><th class="num">Need</th>
+    <table><thead><tr><th>Line</th><th>Matched</th><th>Value</th><th>How</th><th class="num">Need</th>
       <th class="num">Have</th><th class="num">Short</th><th>Box</th><th>Status</th></tr></thead><tbody>
     ${rows.map(r=>{
       const st = BOM_STATE[r.state];
@@ -3314,6 +3315,12 @@ function viewBom(){
            r.val.trim().toUpperCase() !== r.part.val.trim().toUpperCase())
             ? `<br><span style="font-size:10.5px;color:var(--kapton)">${esc(r.part.val)}</span>`
             : ""}</td>
+        <td class="m">${(function(){
+          /* the line's own value, or the matched part's when the line gave
+             none - on a passive it says more than the part number does  */
+          const v = r.val || (r.part && r.part.val) || "";
+          return v ? esc(v) : `<span style="color:var(--ink3)">—</span>`;
+        })()}</td>
         <td style="font-size:11.5px;color:var(--ink3)">${esc(r.how||"")}${
           r.why?`<span style="color:var(--kapton)">${esc(r.why)}</span>`:""}</td>
         <td class="num m">${r.need}</td>
@@ -3362,9 +3369,11 @@ function viewOrder(){
         <button class="btn ghost" id="orderRefresh">Rebuild</button>
       </div></div>
     <div class="tools"><span class="count">${rows.length} lines · ${num(total)} pieces</span></div>
-    <table><thead><tr><th>LCSC</th><th>Part</th><th>Category</th><th class="num">Order</th><th>Why</th></tr></thead><tbody>
+    <table><thead><tr><th>LCSC</th><th>Part</th><th>Value</th><th>Category</th><th class="num">Order</th><th>Why</th></tr></thead><tbody>
     ${rows.map(r=>`<tr><td class="m">${esc(r.lcsc)||`<span style="color:var(--ink3)">—</span>`}</td>
-      <td class="m">${esc(r.mpn)}</td><td>${esc(r.cat)}</td>
+      <td class="m">${esc(r.mpn)}</td>
+      <td class="m">${r.val?esc(r.val):`<span style="color:var(--ink3)">—</span>`}</td>
+      <td>${esc(r.cat)}</td>
       <td class="num m">${r.qty}</td>
       <td style="font-size:12px;color:${r.why.indexOf("BOM")>=0?"var(--esd)":"var(--ink3)"}">${esc(r.why)}</td></tr>`).join("")}
     </tbody></table>

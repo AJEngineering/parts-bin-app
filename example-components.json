@@ -34,7 +34,8 @@
    "min": 100,
    "box": "C1",
    "desc": "10kΩ ±1% 62.5mW 0402 Thick Film Resistor",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25744"
   },
   {
    "id": 2,
@@ -48,7 +49,8 @@
    "min": 50,
    "box": "C1",
    "desc": "10kΩ ±1% 100mW 0603 Thick Film Resistor",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25804"
   },
   {
    "id": 3,
@@ -62,7 +64,8 @@
    "min": 100,
    "box": "C1",
    "desc": "2.7kΩ ±1% 62.5mW 0402 Thick Film Resistor",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25885"
   },
   {
    "id": 4,
@@ -76,7 +79,8 @@
    "min": 50,
    "box": "C1:150 + C2:100",
    "desc": "1kΩ ±1% 100mW 0603 Thick Film Resistor",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/b426be3ce22c6de3e0c3a2248e49159e.pdf?productCode=C22548"
   },
   {
    "id": 5,
@@ -90,7 +94,8 @@
    "min": null,
    "box": "C1",
    "desc": "4.7MΩ ±1% 62.5mW 0402 Thick Film Resistor",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C474132"
   },
   {
    "id": 6,
@@ -104,7 +109,8 @@
    "min": 10,
    "box": "C2",
    "desc": "current sense shunt 1W 1%",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 7,
@@ -118,7 +124,8 @@
    "min": 200,
    "box": "C3",
    "desc": "100nF ±10% 50V X7R 0402",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C1525"
   },
   {
    "id": 8,
@@ -132,7 +139,8 @@
    "min": 50,
    "box": "C3",
    "desc": "22nF ±10% 50V Ceramic Capacitor X7R 0603",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/075a7e54e3698b3e27011665ed540992.pdf?productCode=C302021"
   },
   {
    "id": 9,
@@ -146,7 +154,8 @@
    "min": 40,
    "box": "C3:100 + C8:50",
    "desc": "4.7uF ±10% 25V Ceramic Capacitor X5R 0805",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C1779"
   },
   {
    "id": 10,
@@ -160,7 +169,8 @@
    "min": 20,
    "box": "C4",
    "desc": "aluminium electrolytic, low ESR",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 11,
@@ -174,7 +184,8 @@
    "min": null,
    "box": "C4",
    "desc": "8.5A 3.3uH ±20% 9.5A 22mΩ Molded Inductor SMD",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/9072344370debcf88f3b085e450e71ce.pdf?productCode=C167219"
   },
   {
    "id": 12,
@@ -188,7 +199,8 @@
    "min": null,
    "box": "C4",
    "desc": "440mA 47uH ±10% 844mΩ SMD Power Inductor",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/1102747c90a66a5f75043db5c7191d08.pdf?productCode=C2454088"
   },
   {
    "id": 13,
@@ -202,7 +214,8 @@
    "min": 50,
    "box": "C4",
    "desc": "220Ω @100MHz 1.5A ferrite bead",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 14,
@@ -216,7 +229,8 @@
    "min": 25,
    "box": "C5",
    "desc": "75V 150mA SOD-323 Switching Diode",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/9977bb85cd7e349115b7bcb7054cfa0d.pdf?productCode=C2480"
   },
   {
    "id": 15,
@@ -230,7 +244,8 @@
    "min": 25,
    "box": "C5",
    "desc": "40V 3A Schottky rectifier",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 16,
@@ -244,7 +259,8 @@
    "min": null,
    "box": "C5",
    "desc": "5.1V 500mW zener",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 17,
@@ -258,7 +274,8 @@
    "min": null,
    "box": "C5",
    "desc": "5V bidirectional ESD protection",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 18,
@@ -272,7 +289,8 @@
    "min": 50,
    "box": "C6",
    "desc": "red 620-625nm 2mA 1.8-2.2V",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 19,
@@ -286,7 +304,8 @@
    "min": 15,
    "box": "C6",
    "desc": "N-Channel 60V 115mA 0.225W Surface Mount SOT-23",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/a141b8bd86b14475955ac8c4d3eea0a8.pdf?productCode=C8545"
   },
   {
    "id": 20,
@@ -300,7 +319,8 @@
    "min": 15,
    "box": "C6",
    "desc": "P-Channel 30V 4A 1.4W Surface Mount SOT-23",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 21,
@@ -314,7 +334,8 @@
    "min": null,
    "box": "C6",
    "desc": "NPN 40V 200mA general purpose",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 22,
@@ -328,7 +349,8 @@
    "min": 5,
    "box": "C7",
    "desc": "ARM Cortex-M3 32 Bit 72MHz 37 LQFP-48(7x7) Microcontrollers",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/ac66debd4c13334db1d28037926f8881.pdf?productCode=C8734"
   },
   {
    "id": 23,
@@ -342,7 +364,8 @@
    "min": null,
    "box": "C7",
    "desc": "WiFi + BT module, 4 MB flash",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 24,
@@ -356,7 +379,8 @@
    "min": 10,
    "box": "C7",
    "desc": "1A 3.3V Positive Fixed LDO SOT-223",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/e6935943fc6b1bbf350a1a0f3e90dc4a.pdf?productCode=C6186"
   },
   {
    "id": 25,
@@ -370,7 +394,8 @@
    "min": null,
    "box": "C7",
    "desc": "3A 23V 340kHz synchronous buck",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 26,
@@ -384,7 +409,8 @@
    "min": null,
    "box": "C7",
    "desc": "dual op-amp, 1 MHz",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 27,
@@ -398,7 +424,8 @@
    "min": null,
    "box": "C8",
    "desc": "Crystal 12MHz ±10ppm 20pF SMD3225-4P",
-   "src": "LCSC"
+   "src": "LCSC",
+   "ds": "https://datasheet.lcsc.com/datasheet/pdf/a84bd8d530dd46e4b0f6d0ee59d8a89c.pdf?productCode=C9002"
   },
   {
    "id": 28,
@@ -412,7 +439,8 @@
    "min": 10,
    "box": "C8",
    "desc": "2-way screw terminal, 5.08 mm pitch",
-   "src": ""
+   "src": "",
+   "ds": ""
   },
   {
    "id": 29,
@@ -426,7 +454,8 @@
    "min": null,
    "box": "C8",
    "desc": "tactile switch, 3x6x2.5 mm",
-   "src": ""
+   "src": "",
+   "ds": ""
   }
  ],
  "log": [],
