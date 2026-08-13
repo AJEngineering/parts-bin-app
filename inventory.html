@@ -3877,7 +3877,13 @@ function openEditor(p, seed){
   });
   $("#cancel").onclick = closeEditor;
   const del = $("#del");
+  /* the one button in here that loses something retyping cannot bring back,
+     so it asks first. The undo underneath is real but short-lived - eight
+     seconds, or until the next toast overwrites it                        */
   if(del) del.onclick = ()=>{
+    const n = Number(p.qty||0);
+    if(!confirm("Delete "+(p.mpn||p.lcsc||"this part")+
+                (n ? ", and the "+n+" in stock with it" : "")+"?")) return;
     const at = db.parts.indexOf(p);
     db.parts = db.parts.filter(x=>x.id!==p.id);
     logAdd({k:"del", id:p.id, mpn:p.mpn, lcsc:p.lcsc, cat:p.cat, a:Number(p.qty||0)});
@@ -4301,6 +4307,10 @@ document.addEventListener("click", async ev=>{
   if(bd){
     const id = Number(bd.dataset.bomdel);
     const b = (db.boms||[]).find(x=>x.id===id);
+    /* same reasoning as the delete in the part editor: one stray click and a
+       pasted BOM nobody kept a copy of is gone                             */
+    if(b && !confirm("Delete the board "+b.name+" and its "+
+                     bomCapacity(b.text).lines+" lines?")) return;
     const at = (db.boms||[]).indexOf(b);
     db.boms = (db.boms||[]).filter(x=>x.id!==id);
     save(); render();
