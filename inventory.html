@@ -663,7 +663,7 @@ function haystack(p){
 }
 
 /* one search term. Plain text scans every field; "box:C7" scans one field;
-   "qty<10" compares the quantity.                                          */
+   "qty<10" compares the quantity; "<=10Ω" compares the value itself.       */
 const FIELDS = {BOX:"box", CAT:"cat", PKG:"pkg", LCSC:"lcsc", MPN:"mpn", VAL:"val",
                 DESC:"desc", SRC:"src", MFR:"mfr", MAKER:"mfr"};
 /* the same fields, addressed by whether they are filled in at all */
@@ -671,9 +671,46 @@ const BLANK_FIELDS = {VALUE:"val", VAL:"val", BOX:"box", LCSC:"lcsc", MPN:"mpn",
                       MFR:"mfr", MAKER:"mfr", MANUFACTURER:"mfr", PKG:"pkg", PACKAGE:"pkg",
                       DESC:"desc", DESCRIPTION:"desc", SRC:"src", SOURCE:"src",
                       SUPPLIER:"src", MIN:"min", CAT:"cat", CATEGORY:"cat"};
+/* ---------------------------------------------------- comparing a value */
+const SI_PRE = "pnuµmkKMGT";
+/* The quantity inside `text` that is measured in `unit`, or NaN when there
+   is none. A value written for a human holds more than one number - a
+   capacitor as "25V 4.7uF X5R ±10%" carries volts, farads, a dielectric
+   code and a tolerance - so the unit asked for is what picks the one being
+   compared.
+
+   The number has to start on a boundary or the 5 in that X5R code reads as
+   five ohms, and nothing lettered may follow the unit or the H in "12MHz"
+   reads as henries.                                                       */
+function valueIn(text, unit){
+  const s = String(text==null?"":text);
+  const U = unit==="Ω" ? "(?:Ω|[Oo][Hh][Mm][Ss]?|R)" : unit;
+  const re = new RegExp("(?:^|[^0-9A-Za-z.])(\\d+(?:\\.\\d+)?)\\s*(["+SI_PRE+"]?)"+
+                        U+"(?![A-Za-z0-9])", "g");
+  const m = re.exec(s);
+  if(m){
+    const n = parseFloat(m[1]);
+    if(isFinite(n)) return n * (m[2] ? SI_IN[m[2]] : 1);
+  }
+  if(unit==="Ω"){
+    /* 4R7, 1k2, 2M2 - the prefix standing in for the decimal point */
+    const r = /(?:^|[^0-9A-Za-z.])(\d+)([RkKMG])(\d+)(?![A-Za-z0-9])/.exec(s);
+    if(r) return parseFloat(r[1]+"."+r[3]) * SI_IN[r[2]];
+    /* a bare "10k" or "220" is a resistance by convention, and only a
+       resistance - nobody writes a capacitor without its F              */
+    const b = /^(\d+(?:\.\d+)?)([pnuµmkKMGT]?)$/.exec(s.trim());
+    if(b) return parseFloat(b[1]) * (b[2] ? SI_IN[b[2]] : 1);
+  }
+  return NaN;
+}
+
 function matches(p, term){
+  /* Terms keep the case they were typed in: m is milli and M is mega, and
+     upper-casing the query would turn 10mΩ into ten megohms. Everything
+     that does not care compares against T instead.                        */
+  const T = term.toUpperCase();
   /* "no:value" and "has:box" ask whether a field is filled, not what it holds */
-  const nf = /^(NO|HAS|MISSING):(.+)$/.exec(term);
+  const nf = /^(NO|HAS|MISSING):(.+)$/.exec(T);
   if(nf){
     const key = BLANK_FIELDS[nf[2]];
     if(key){
@@ -682,19 +719,35 @@ function matches(p, term){
     }
     return false;
   }
-  const f = /^([A-Z]+):(.*)$/.exec(term);
+  const f = /^([A-Z]+):(.*)$/.exec(T);
   if(f && FIELDS[f[1]]) return String(p[FIELDS[f[1]]]||"").toUpperCase().includes(f[2]);
-  const c = /^QTY(<=|>=|<|>|=)(\d+(?:\.\d+)?)$/.exec(term);
+  const c = /^QTY(<=|>=|<|>|=)(\d+(?:\.\d+)?)$/.exec(T);
   if(c){
     const n = Number(p.qty||0), r = Number(c[2]);
     return c[1]==="<" ? n<r : c[1]===">" ? n>r : c[1]==="<=" ? n<=r : c[1]===">=" ? n>=r : n===r;
   }
-  return haystack(p).includes(term);
+  /* "<=10Ω", ">=100nF", "<4.7uF". The unit is not optional: it is the whole
+     of how the search knows which number in the value to read, and without
+     one there is nothing to compare against. A part carrying no quantity in
+     that unit is not an answer to the question and drops out.              */
+  const v = /^(<=|>=|<|>|=)(\d+(?:\.\d+)?)([pnuµmkKMGT]?)(Hz|Ω|R|F|H|V|A|W)$/.exec(term);
+  if(v){
+    const unit = v[4]==="R" ? "Ω" : v[4];
+    /* the value field first; a part that never had one is read out of its
+       description rather than dropped for a field nobody filled in        */
+    let n = valueIn(p.val, unit);
+    if(!isFinite(n) && String(p.val||"").trim()==="") n = valueIn(p.desc, unit);
+    if(!isFinite(n)) return false;
+    const r = parseFloat(v[2]) * (v[3] ? SI_IN[v[3]] : 1);
+    return v[1]==="<" ? n<r : v[1]===">" ? n>r : v[1]==="<=" ? n<=r : v[1]===">=" ? n>=r
+         : Math.abs(n-r) <= Math.abs(r)*1e-9;
+  }
+  return haystack(p).includes(T);
 }
 const anyFilter = ()=> !!(ui.cat || ui.box || ui.low || ui.mfr);
 
 function filtered(queryOnly){
-  const terms = ui.q.trim().toUpperCase().split(/\s+/).filter(Boolean);
+  const terms = ui.q.trim().split(/\s+/).filter(Boolean);
   let list = db.parts.filter(p=>{
     if(!queryOnly){
       if(ui.cat && p.cat!==ui.cat) return false;
@@ -3185,7 +3238,9 @@ function viewParts(){
     return head + `<div class="noresult"><b>Not in the bin</b>
       Every word has to match, across part number, value, package, description, category and box.
       Narrow one field with <span class="pn">box:C7</span> <span class="pn">pkg:0603</span> <span class="pn">cat:MCU</span>,
-      or compare stock with <span class="pn">qty&lt;10</span>.
+      compare stock with <span class="pn">qty&lt;10</span>, or compare the value itself with
+      <span class="pn">&lt;=10Ω</span> <span class="pn">&gt;=100nF</span> — the unit is what says
+      which number in the value to read.
       <p><a class="linkish" target="_blank" rel="noreferrer"
         href="https://www.lcsc.com/search?q=${encodeURIComponent(ui.q.trim())}">Look up "${esc(ui.q.trim())}" on lcsc.com</a>
         · <button class="linkish" id="addBtn2">add it as a new part</button></p></div>`;
@@ -3704,6 +3759,8 @@ function viewData(){
         <b>10k 0603</b><span>both words, any field</span>
         <b>mfr:murata</b><span>one field only — mfr, box, cat, pkg, lcsc, mpn, val, desc, src</span>
         <b>qty&lt;10</b><span>compare stock: &lt; &gt; &lt;= &gt;= =</span>
+        <b>&lt;=10Ω</b><span>compare the value — also &gt;=100nF, &lt;4.7uF, &gt;=1MHz. Units: Ω F H Hz V A W, or R for ohms</span>
+        <b>&lt;=25V</b><span>the unit picks which number is read, so this finds the 25V in <b style="display:inline">25V 4.7uF X5R</b> and a part with no volts in it drops out</span>
         <b>no:value</b><span>the field is empty \u2014 also no:box, no:lcsc, no:mfr, no:pkg, no:min</span>
         <b>has:mfr</b><span>the field is filled in</span>
         <b>cat:MCU qty&lt;5</b><span>mix them freely</span>
