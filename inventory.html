@@ -343,7 +343,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "2.0.0";
+const APP_VERSION = "2.1.0";
 const REPO_URL = "https://github.com/AJEngineering/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -1079,7 +1079,15 @@ function pickPanel(){
          <td class="num m">—</td><td style="color:var(--alert)">not in the bin</td></tr>`
     : `<tr><td class="tick"><input type="checkbox" class="picktick" data-pk="${esc(pickKey(r))}"${ui.picked[pickKey(r)]?" checked":""}></td>
          <td class="m"><b>${esc(r.box||"—")}</b></td>
-         <td>${esc(r.part.mpn||"—")}${r.part.val?`<br><span style="color:var(--ink3);font-size:11px">${esc(r.part.val)}${r.part.pkg?" · "+esc(r.part.pkg):""}</span>`:""}</td>
+         <td title="${esc(r.part.desc||"")}">${esc(r.part.mpn||r.part.lcsc||"—")}${(()=>{
+           /* value and package, either without the other. Gating this on the
+              value alone lost the package of everything that has no value in
+              the usual sense - an MCU, a regulator - which are the rows whose
+              package you most need when the drawer is open.                */
+           const bits = [r.part.val, r.part.pkg].filter(x=>String(x||"").trim());
+           return bits.length ? `<br><span style="color:var(--ink3);font-size:11px">${
+             bits.map(esc).join(" · ")}</span>` : "";
+         })()}</td>
          <td class="m" style="color:var(--ink2)">${esc(r.part.lcsc||"—")}</td>
          <td style="color:var(--ink3)">${esc(r.ref||"")}</td>
          <td class="num m" style="font-size:15px;font-weight:600">${r.take}</td>
@@ -1289,6 +1297,18 @@ async function bomFillMpn(){
 /* --------------------------------------------------------------- ordering -
    Everything worth buying: the shortfalls of the last BOM run, plus anything
    at or below its own alert level.                                          */
+/* Pieces already bought and not yet here. Without this the shopping list
+   keeps proposing what is on its way, and the same reel gets ordered twice. */
+function onOrder(pid, lcsc, mpn){
+  let n = 0;
+  (db.pending||[]).forEach(o=>o.lines.forEach(l=>{
+    const same = (pid!==null && pid!==undefined && l.pid===pid) ||
+                 (!!lcsc && l.lcsc===lcsc) || (!!mpn && l.mpn===mpn);
+    if(same) n += Number(l.qty||0);
+  }));
+  return n;
+}
+
 function buildOrder(){
   const rows = new Map();
   const add = (key, o)=>{
@@ -1300,15 +1320,24 @@ function buildOrder(){
     const key = (r.part && r.part.id) || ("bom:"+(r.mpn||r.lcsc||r.val));
     add(key, {lcsc:(r.part&&r.part.lcsc)||r.lcsc||"", mpn:(r.part&&r.part.mpn)||r.mpn||r.val||"",
               val:(r.part&&r.part.val)||r.val||"",
-              cat:(r.part&&r.part.cat)||"", qty:r.short, why:"BOM"});
+              cat:(r.part&&r.part.cat)||"", why:"BOM",
+              qty: Math.max(0, r.short - onOrder(r.part?r.part.id:null, r.lcsc||"", r.mpn||"")),
+              /* carried so an edited quantity can be judged against the shelf
+                 it is going to land on, not against nothing               */
+              have: r.part?Number(r.part.qty||0):null, min: r.part?minOf(r.part):null,
+              desc:(r.part&&r.part.desc)||"", pkg:(r.part&&r.part.pkg)||r.pkg||""});
   });
   db.parts.filter(isLow).forEach(p=>{
     /* top the shelf back up to twice the alert level, at least 10 pieces */
     const target = Math.max(minOf(p)*2, 10);
-    const q = Math.max(1, Math.ceil(target - Number(p.qty||0)));
-    add(p.id, {lcsc:p.lcsc||"", mpn:p.mpn||"", val:p.val||"", cat:p.cat, qty:q, why:"low stock"});
+    const q = Math.max(0, Math.ceil(target - Number(p.qty||0) - onOrder(p.id, p.lcsc, p.mpn)));
+    add(p.id, {lcsc:p.lcsc||"", mpn:p.mpn||"", val:p.val||"", cat:p.cat, qty:q, why:"low stock",
+               have:Number(p.qty||0), min:minOf(p), desc:p.desc||"", pkg:p.pkg||""});
   });
-  return [...rows.values()].sort((a,b)=> a.why.localeCompare(b.why) || (a.cat||"").localeCompare(b.cat||""));
+  /* the figure worked out above is a suggestion and is kept as one, so a
+     line that has been edited can say what it was and be put back        */
+  return [...rows.values()].filter(r=>Number(r.qty||0)>0).map(r=>Object.assign(r, {sug:r.qty}))
+    .sort((a,b)=> a.why.localeCompare(b.why) || (a.cat||"").localeCompare(b.cat||""));
 }
 
 /* --------------------------------------------------- filling in the value --
@@ -2117,13 +2146,23 @@ function viewBom(){
     ${rows.map(r=>{
       const st = BOM_STATE[r.state];
       return `<tr><td class="m">${esc(r.mpn||r.lcsc||r.val)}${r.ref?`<br><span style="color:var(--ink3);font-size:11px">${esc(r.ref)}</span>`:""}</td>
-        <td class="m">${r.part?esc(r.part.mpn||r.part.lcsc):`<span style="color:var(--ink3)">—</span>`}${
-          /* matched on the number alone: 4.7uF is 4.7uF to the matcher whether
-             it is rated 25V or 50V, so show the wording when it differs   */
-          (r.part && /^value/.test(r.how||"") && r.val && r.part.val &&
-           r.val.trim().toUpperCase() !== r.part.val.trim().toUpperCase())
-            ? `<br><span style="font-size:10.5px;color:var(--kapton)">${esc(r.part.val)}</span>`
-            : ""}</td>
+        <td class="m" title="${r.part?esc(r.part.desc||""):""}">${r.part?esc(r.part.mpn||r.part.lcsc):`<span style="color:var(--ink3)">—</span>`}${(()=>{
+          /* What it actually landed on. The package is the half that decides
+             whether a match is the right one - an ambiguous value is refused
+             precisely because 1k comes in 0603, 0805 and 1206 - so when one
+             does match, the drawer it chose is worth seeing. The wording of
+             the value comes with it in amber where it differs from the line,
+             since 4.7uF is 4.7uF to the matcher whether it is 25V or 50V. */
+          if(!r.part) return "";
+          const differs = /^value/.test(r.how||"") && r.val && r.part.val &&
+                          r.val.trim().toUpperCase() !== r.part.val.trim().toUpperCase();
+          const bits = [];
+          if(differs) bits.push(`<span style="color:var(--kapton)">${esc(r.part.val)}</span>`);
+          if(r.part.pkg) bits.push(esc(r.part.pkg));
+          return bits.length
+            ? `<br><span style="font-size:10.5px;color:var(--ink3)">${bits.join(" · ")}</span>`
+            : "";
+        })()}</td>
         <td class="m">${(function(){
           /* the line's own value, or the matched part's when the line gave
              none - on a passive it says more than the part number does  */
@@ -2162,29 +2201,179 @@ function receivePanel(){
     </div>`;
 }
 
+/* A quantity is only wrong against the shelf it lands on. Ordering five when
+   the alert level is fifty is fine if fifty are already there; ordering five
+   onto an empty drawer is not. So the test is what the delivery leaves you
+   with, and the line says the sum rather than just complaining.           */
+function orderWarn(r){
+  if(r.min===null || r.min===undefined || r.have===null || r.have===undefined) return "";
+  const after = Number(r.have) + Number(r.qty||0);
+  if(Number(r.qty||0) <= 0) return "nothing ordered — still "+r.have+", alert at "+r.min;
+  if(after <= r.min) return "still low after this: "+r.have+" + "+r.qty+" = "+after+", alert at "+r.min;
+  return "";
+}
+
+/* the note beside one line, and the running total, without a redraw */
+function orderSync(i){
+  const rows = ui.order||[];
+  const r = rows[i];
+  const note = document.querySelector('.ordnote[data-i="'+i+'"]');
+  if(r && note){
+    const warn = orderWarn(r);
+    note.innerHTML = (r.qty < r.sug
+        ? '<br><button class="linkish" data-ordreset="'+i+'" title="put the suggestion back">suggested '+r.sug+'</button>'
+        : "") +
+      (warn ? '<br><span style="color:var(--kapton)">'+esc(warn)+'</span>' : "");
+  }
+  const live = rows.filter(x=>Number(x.qty||0)>0);
+  const c = document.querySelector(".tools .count");
+  if(c) c.textContent = live.length+" lines · "+num(live.reduce((s,x)=>s+Number(x.qty||0),0))+" pieces";
+}
+
+/* ------------------------------------------------- ordered, not yet here --
+   A shopping list stops being useful the moment it is sent: the parts are
+   bought but not on the shelf, and the bin says you still have none. So a
+   sent order is kept, and booking it in is one button rather than typing
+   every line back in by hand.
+
+   The box is asked for here rather than guessed, because a delivery is
+   exactly when you decide where something is going to live. A part already
+   on the shelf offers the drawer it is in; a part the bin has never seen
+   offers the next free one.                                              */
+function pendingAdd(){
+  const rows = (ui.order||[]).filter(r=>Number(r.qty||0)>0);
+  if(!rows.length) return toast("Nothing on the list");
+  const free = (nextFree()[0]||{}).next || "";
+  const o = {
+    id: Date.now(),
+    at: new Date().toISOString().slice(0,10),
+    lines: rows.map(r=>{
+      const p = db.parts.find(x=>x.lcsc && r.lcsc && x.lcsc===r.lcsc) ||
+                db.parts.find(x=>x.mpn && r.mpn && x.mpn===r.mpn) || null;
+      return {pid:p?p.id:null, lcsc:r.lcsc||"", mpn:r.mpn||"", val:r.val||"",
+              cat:r.cat||"", qty:Number(r.qty), box:(p&&p.box)||"",
+              desc:(p&&p.desc)||"", pkg:(p&&p.pkg)||""};
+    })
+  };
+  db.pending = db.pending||[];
+  db.pending.push(o);
+  ui.order = null;
+  save(); render();
+  toast("Marked "+o.lines.length+" lines as ordered", "Undo", ()=>{
+    db.pending = db.pending.filter(x=>x.id!==o.id);
+    save(); render();
+  });
+}
+
+function pendingPanel(){
+  const list = db.pending||[];
+  if(!list.length) return "";
+  return list.map(o=>{
+    const pcs = o.lines.reduce((s,l)=>s+Number(l.qty||0),0);
+    const noBox = o.lines.filter(l=>!String(l.box||"").trim()).length;
+    return `<div class="panel"><h2>On order · ${esc(o.at)}</h2>
+      <p>${o.lines.length} line${o.lines.length===1?"":"s"} · ${num(pcs)} pieces, bought and not yet on the shelf.
+         The box is where each one will go when it arrives — a part already on a shelf offers the drawer it is in.
+         ${noBox?`<b style="color:var(--kapton)">${noBox} line${noBox===1?"":"s"} still ${noBox===1?"has":"have"} no box.</b>`
+                :"Every line has a box."}</p>
+      <table><thead><tr><th>LCSC</th><th>Part</th><th>Value</th><th>Description</th><th class="num">Coming</th><th>Box</th><th></th></tr></thead>
+        <tbody>${o.lines.map((l,i)=>`<tr>
+          <td class="m">${esc(l.lcsc)||`<span style="color:var(--ink3)">—</span>`}</td>
+          <td class="m">${esc(l.mpn)}${l.pid?"":`<br><span style="color:var(--esd);font-size:11px">new part</span>`}</td>
+          <td class="m">${l.val?esc(l.val):`<span style="color:var(--ink3)">—</span>`}</td>
+          <td style="font-size:12px;color:var(--ink2);max-width:280px" title="${esc(l.desc||"")}">${
+            l.desc ? esc(l.desc) : (l.pkg ? `<span class="pn">${esc(l.pkg)}</span>`
+                                          : `<span style="color:var(--ink3)">—</span>`)}</td>
+          <td class="num m">${l.qty}</td>
+          <td><input class="pendbox" data-o="${o.id}" data-i="${i}" value="${esc(l.box)}"
+                placeholder="C7" spellcheck="false" style="max-width:110px"></td>
+          <td><button class="linkish" style="color:var(--alert)" data-penddrop="${o.id}:${i}">drop</button></td>
+        </tr>`).join("")}</tbody></table>
+      <div class="sheetbar">
+        <button class="btn" data-pendtake="${o.id}">Book in ${num(pcs)} pieces</button>
+        <button class="btn ghost" data-pendcancel="${o.id}">Cancel this order</button>
+        <span style="color:var(--ink3);font-size:12px;flex:1;min-width:220px">Booking in adds every line to the shelf
+          at once, with one movement per part in the log and a single undo. A line whose part the bin has never seen
+          is created, in the category the order carried.</span></div>
+    </div>`;
+  }).join("");
+}
+
+function pendingReceive(id){
+  const o = (db.pending||[]).find(x=>x.id===id);
+  if(!o) return;
+  const blank = o.lines.filter(l=>!String(l.box||"").trim());
+  if(blank.length && !confirm(blank.length+" line"+(blank.length===1?"":"s")+
+      " arriving with no box.\n\nBook them in anyway? They can be given one later, and the Parts view will list them under “missing box”.")) return;
+  const undo = [];
+  let made = 0;
+  o.lines.forEach(l=>{
+    let p = l.pid!==null ? db.parts.find(x=>x.id===l.pid) : null;
+    if(!p && l.lcsc) p = db.parts.find(x=>x.lcsc===l.lcsc);
+    if(p){
+      const was = Number(p.qty||0), wasBox = p.box;
+      undo.push({p, was, wasBox});
+      p.qty = was + Number(l.qty||0);
+      if(String(l.box||"").trim()) p.box = String(l.box).trim().toUpperCase();
+      logAdd({k:"qty", id:p.id, mpn:p.mpn, lcsc:p.lcsc, cat:p.cat,
+              d:Number(l.qty||0), a:was, b:p.qty});
+    }else{
+      const rec = {id: 1+db.parts.reduce((m,x)=>Math.max(m,x.id),0),
+                   cat: l.cat || db.categories[0] || "Uncategorised",
+                   lcsc:(l.lcsc||"").toUpperCase(), mpn:l.mpn||"", val:l.val||"", pkg:"", mfr:"",
+                   qty:Number(l.qty||0), min:null, box:String(l.box||"").trim().toUpperCase(),
+                   desc:"", src:"order", ds:""};
+      if(rec.cat && !db.categories.includes(rec.cat)) db.categories.push(rec.cat);
+      db.parts.push(rec);
+      undo.push({p:rec, isNew:true});
+      logAdd({k:"add", id:rec.id, mpn:rec.mpn, lcsc:rec.lcsc, cat:rec.cat, b:rec.qty});
+      made++;
+    }
+  });
+  const pcs = o.lines.reduce((s,l)=>s+Number(l.qty||0),0);
+  db.pending = db.pending.filter(x=>x.id!==id);
+  ui.order = null;
+  save(); render();
+  toast("Booked in "+num(pcs)+" pieces"+(made?", "+made+" new part"+(made===1?"":"s"):""), "Undo", ()=>{
+    undo.forEach(u=>{ if(u.isNew) db.parts = db.parts.filter(x=>x!==u.p);
+                      else { u.p.qty = u.was; u.p.box = u.wasBox; } });
+    db.pending.push(o);
+    save(); render();
+  });
+}
+
 function viewOrder(){
   const rows = ui.order || buildOrder();
   ui.order = rows;
-  const total = rows.reduce((s,r)=>s+r.qty,0);
-  if(!rows.length) return receivePanel() + `<div class="noresult"><b>Nothing to buy</b>
+  const live  = rows.filter(r=>Number(r.qty||0)>0);
+  const total = live.reduce((s,r)=>s+Number(r.qty||0),0);
+  if(!rows.length) return receivePanel() + pendingPanel() + `<div class="noresult"><b>Nothing to buy</b>
       No shortfall from the last BOM check and nothing at or below its alert level.</div>`;
-  return receivePanel() + `<div class="panel"><h2>Shopping list</h2>
+  return receivePanel() + pendingPanel() + `<div class="panel"><h2>Shopping list</h2>
       <p>Shortfalls from the BOM check plus everything at or below its own alert level.
          Low stock lines are topped back up to twice the alert level, at least 10 pieces.
          The LCSC export is the two column format their bulk order box accepts.</p>
       <div class="sheetbar">
         <button class="btn" id="orderLcsc">Copy for LCSC bulk order</button>
         <button class="btn ghost" id="orderCsv">Export .csv</button>
-        <button class="btn ghost" id="orderRefresh">Rebuild</button>
+        <button class="btn ghost" id="orderMark">Mark as ordered</button>
+          <button class="btn ghost" id="orderRefresh">Rebuild</button>
       </div></div>
-    <div class="tools"><span class="count">${rows.length} lines · ${num(total)} pieces</span></div>
-    <table><thead><tr><th>LCSC</th><th>Part</th><th>Value</th><th>Category</th><th class="num">Order</th><th>Why</th></tr></thead><tbody>
-    ${rows.map(r=>`<tr><td class="m">${esc(r.lcsc)||`<span style="color:var(--ink3)">—</span>`}</td>
-      <td class="m">${esc(r.mpn)}</td>
-      <td class="m">${r.val?esc(r.val):`<span style="color:var(--ink3)">—</span>`}</td>
-      <td>${esc(r.cat)}</td>
-      <td class="num m">${r.qty}</td>
-      <td style="font-size:12px;color:${r.why.indexOf("BOM")>=0?"var(--esd)":"var(--ink3)"}">${esc(r.why)}</td></tr>`).join("")}
+    <div class="tools"><span class="count">${live.length} lines · ${num(total)} pieces</span></div>
+    <table><thead><tr><th>LCSC</th><th>Part</th><th>Value</th><th>Description</th><th>Category</th><th class="num">Order</th><th>Why</th></tr></thead><tbody>
+      ${rows.map((r,i)=>{ const warn = orderWarn(r);
+        return `<tr><td class="m">${esc(r.lcsc)||`<span style="color:var(--ink3)">—</span>`}</td>
+        <td class="m">${esc(r.mpn)}</td>
+        <td class="m">${r.val?esc(r.val):`<span style="color:var(--ink3)">—</span>`}</td>
+        <td style="font-size:12px;color:var(--ink2);max-width:280px" title="${esc(r.desc||"")}">${
+          r.desc ? esc(r.desc) : (r.pkg ? `<span class="pn">${esc(r.pkg)}</span>`
+                                        : `<span style="color:var(--ink3)">—</span>`)}</td>
+        <td>${esc(r.cat)}</td>
+        <td class="num"><input class="ordqty" type="number" min="0" step="1" data-i="${i}"
+             value="${Number(r.qty||0)}" inputmode="numeric"></td>
+        <td style="font-size:12px;color:${r.why.indexOf("BOM")>=0?"var(--esd)":"var(--ink3)"}">${esc(r.why)}<span class="ordnote" data-i="${i}">${
+          r.qty < r.sug ? `<br><button class="linkish" data-ordreset="${i}" title="put the suggestion back">suggested ${r.sug}</button>` : ""}${
+          warn ? `<br><span style="color:var(--kapton)">${esc(warn)}</span>` : ""}</span></td></tr>`;}).join("")}
     </tbody></table>
     <p style="color:var(--ink3);font-size:12px;margin-top:10px">${rows.filter(r=>!r.lcsc).length} lines have no LCSC code and will not paste into the bulk box — order those by part number.</p>`;
 }
@@ -3141,16 +3330,51 @@ document.addEventListener("click", async ev=>{
   }
   if(t.id==="bomToOrder"){ ui.order = buildOrder(); ui.view="order"; render(); return; }
 
+  if(t.id==="orderMark"){ pendingAdd(); return; }
+  const ptk = t.closest("[data-pendtake]");
+  if(ptk){ pendingReceive(Number(ptk.dataset.pendtake)); return; }
+  const pcx = t.closest("[data-pendcancel]");
+  if(pcx){
+    const o = (db.pending||[]).find(x=>x.id===Number(pcx.dataset.pendcancel));
+    if(!o) return;
+    if(!confirm("Cancel the order of "+o.at+"?" + String.fromCharCode(10,10) + "Its "+o.lines.length+" lines go back to the shopping list.")) return;
+    db.pending = db.pending.filter(x=>x!==o);
+    ui.order = null; save(); render();
+    toast("Order cancelled", "Undo", ()=>{ db.pending.push(o); save(); render(); });
+    return;
+  }
+  const pdr = t.closest("[data-penddrop]");
+  if(pdr){
+    const [oid,ix] = pdr.dataset.penddrop.split(":");
+    const o = (db.pending||[]).find(x=>x.id===Number(oid));
+    if(!o) return;
+    const gone = o.lines.splice(Number(ix),1)[0];
+    if(!o.lines.length) db.pending = db.pending.filter(x=>x!==o);
+    save(); render();
+    toast("Dropped "+(gone.mpn||gone.lcsc||"the line"), "Undo", ()=>{
+      if(!db.pending.includes(o)) db.pending.push(o);
+      o.lines.splice(Number(ix),0,gone); save(); render();
+    });
+    return;
+  }
+  const orst = t.closest("[data-ordreset]");
+  if(orst){
+    const i = Number(orst.dataset.ordreset);
+    const r = (ui.order||[])[i];
+    if(r){ r.qty = r.sug; const box = document.querySelector('.ordqty[data-i="'+i+'"]');
+           if(box) box.value = r.qty; orderSync(i); }
+    return;
+  }
   if(t.id==="orderRefresh"){ ui.order = buildOrder(); render(); toast("Rebuilt"); return; }
   if(t.id==="orderCsv"){
-    const rows = ui.order || buildOrder();
+    const rows = (ui.order || buildOrder()).filter(r=>Number(r.qty||0)>0);
     const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
     download("order.csv", "\uFEFF" + ["lcsc,mpn,category,quantity,why"]
       .concat(rows.map(r=>[r.lcsc,r.mpn,r.cat,r.qty,r.why].map(q).join(","))).join("\r\n"), "text/csv");
     return;
   }
   if(t.id==="orderLcsc"){
-    const rows = (ui.order || buildOrder()).filter(r=>r.lcsc);
+    const rows = (ui.order || buildOrder()).filter(r=>r.lcsc && Number(r.qty||0)>0);
     const text = rows.map(r=>r.lcsc+","+r.qty).join("\n");
     if(!text) return toast("No line carries an LCSC code");
     try{
@@ -3533,6 +3757,23 @@ document.addEventListener("drop", ev=>{
 document.addEventListener("dragend", ()=>{ catDrag = null; catDropMarks(); });
 
 document.addEventListener("input", ev=>{
+  /* an order quantity, edited in place. No render: it would take the caret
+     out of the box being typed in, so the note and the total are brought up
+     to date by hand instead.                                             */
+  if(ev.target.classList && ev.target.classList.contains("pendbox")){
+    const o = (db.pending||[]).find(x=>x.id===Number(ev.target.dataset.o));
+    const l = o && o.lines[Number(ev.target.dataset.i)];
+    if(l){ l.box = ev.target.value.trim().toUpperCase(); save(); }
+    return;
+  }
+  if(ev.target.classList && ev.target.classList.contains("ordqty")){
+    const rows = ui.order||[];
+    const r = rows[Number(ev.target.dataset.i)];
+    if(!r) return;
+    r.qty = Math.max(0, Math.floor(Number(ev.target.value)||0));
+    orderSync(Number(ev.target.dataset.i));
+    return;
+  }
   if(ev.target.id==="bomText"){ ui.bomText = ev.target.value; return; }
   if(ev.target.id==="bomName"){ ui.bomName = ev.target.value; return; }
   if(ev.target.id==="rcvText"){ ui.rcvText = ev.target.value; return; }
@@ -3636,6 +3877,17 @@ function normalize(d){
     id:Number(b.id||Date.now()), name:String(b.name||"board"), text:String(b.text||""),
     boards:Number(b.boards||1), updated:String(b.updated||"")
   })) : [];
+  /* orders placed and not yet on the shelf. Kept in the data file, so the
+     bench that ordered and the bench that unpacks are the same list.    */
+  d.pending = Array.isArray(d.pending) ? d.pending.map(o=>({
+    id:Number(o.id||Date.now()), at:String(o.at||""),
+    lines:(Array.isArray(o.lines)?o.lines:[]).map(l=>({
+      pid:(l.pid===null||l.pid===undefined)?null:Number(l.pid),
+      lcsc:(l.lcsc||"").toUpperCase(), mpn:l.mpn||"", val:l.val||"", cat:l.cat||"",
+      qty:Number(l.qty||0), box:(l.box||"").toUpperCase(),
+      desc:l.desc||"", pkg:padPkg(l.pkg)
+    })).filter(l=>l.qty>0)
+  })).filter(o=>o.lines.length) : [];
   d.version = 1;
   return d;
 }

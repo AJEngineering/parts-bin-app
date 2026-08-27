@@ -231,6 +231,13 @@ footprint, nothing is matched at all — a bin holding 1kΩ in 0603, 1206 and 08
 hand back whichever was entered first, and the exported file would carry that part's number and
 that footprint.
 
+**What it landed on** is written under the matched part number: the package always, and the part's
+own wording for the value in amber where that differs from the line's. The package is the half that
+decides whether a match is the right one — an ambiguous value is refused *because* 1 kΩ comes in
+0603, 0805 and 1206 — so when a line does match, the drawer it chose is worth seeing without
+opening anything. The part's full description is on the cell as a tooltip, which costs no width in
+a table that already runs to nine columns.
+
 ### Sending it to a board house
 
 **Send it to a fab** exports the checked BOM for **JLCPCB**, **PCBWay**, **NextPCB** or **PCBGOGO**.
@@ -305,6 +312,49 @@ to be ordered by part number.
 **Order → Receive** takes the delivery note back: paste the supplier's CSV, check it, and book the
 lot in at once. Parts already on the shelf have their quantity added; anything new is created and
 only needs a box.
+
+### Setting the quantity yourself
+
+Every line's quantity is an editable box. The worked-out figure is only a suggestion, and it says so
+when you order **less** than it proposed — **suggested 95** appears beside the line and puts it back
+in one click. Ordering more says nothing, because buying a bigger reel than you strictly need is a
+decision rather than a slip.
+
+A line changed to **0** is left out of both exports and out of the piece count, which is how you say
+*not this time* without deleting anything.
+
+A **Description** column sits beside the value in both this list and the one below it, because a
+part number alone is a poor way to recognise what you are about to buy. Where a part carries no
+description its package stands in, and a line for something the bin has never seen has neither.
+
+If what you order would still leave the part at or below its own alert level, the line says so with
+the arithmetic rather than just a complaint:
+
+> still low after this: 5 + 10 = 15, alert at 50
+
+That test is against the shelf the delivery lands on, not against the number on its own — ordering
+five when the alert level is fifty is perfectly sensible if fifty are already in the drawer.
+
+### Ordered, not yet here
+
+**Mark as ordered** moves the list to an **On order** panel and out of the shopping list, so the same
+reel is not bought twice: anything already on its way is subtracted from what the list proposes next
+time, and a line fully covered by an outstanding order disappears from it.
+
+Each waiting line carries a **box** — where that part will go when it arrives. A part already on a
+shelf offers the drawer it is in; one the bin has never seen starts blank, and the panel counts how
+many are still unanswered.
+
+The **Description** beside it is the one already on the part, which is what tells one bag of black
+plastic from another when the envelope is opened. A part the bin has never seen has no description
+to show, so its package stands in where one is known.
+
+**Book in N pieces** puts the whole delivery on the shelf in one press: quantities added, boxes
+applied, parts the bin had never seen created in the category the order carried. One movement per
+part in the log, and a single **Undo** that takes it all back off again — the created parts included.
+
+A line can be dropped from a waiting order, or the whole order cancelled, in which case its lines
+return to the shopping list.
 
 ## Calculators — now their own project
 
