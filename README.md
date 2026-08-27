@@ -61,9 +61,10 @@ you can replace either one without touching the other. There is a small
 | **Parts** | Search, filter and count what is on the shelf |
 | **Boxes** | Which drawer holds what, plus the next free box number |
 | **BOM** | Paste a bill of materials and see what you can build right now |
+| **BOM → Take it off the shelf** | The picking walk: what to pull, drawer by drawer, then book it all out |
 | **Order** | What has run low, ready to paste into the LCSC bulk order box |
 | **Duplicates** | The same part entered twice under two different names |
-| **Calc** | Everyday bench formulas, each with its schematic drawn |
+| **Calc ↗** | A link. The bench calculators are their own page now — see below |
 | **Log** | Every movement, stamped with the machine that made it |
 | **Data** | The data file, GitHub sync, categories, and the LCSC settings |
 | **About** | What this is, the licence, and where the source lives |
@@ -262,6 +263,36 @@ which tells a fab nothing — so a three-digit footprint that is really a chip s
 out, whether it arrives in a pasted BOM, gets typed into the editor, or is already sitting in your
 data file.
 
+### Building it yourself — the picking walk
+
+Sending the board out is one direction. **Take it off the shelf** is the other, and it sits under
+the fab exports on the same tab: what to pick, drawer by drawer, for however many boards you set.
+
+The list has **one row per drawer, not per line.** A part written `C1:150 + C2:100` and needed 200
+times is two stops on the walk, not one, and the rows are sorted by box number so you go along the
+shelf once and never double back. Lowest drawer first.
+
+**Print the walk** prints that table and its counters alone — the pasted BOM, the fab panel and the
+rest of the working material stay off the sheet you carry to the shelf.
+
+Every row has a tick box, on screen and on paper, and **what you tick is what leaves the bin**. The
+list starts empty because the printed sheet has to start empty: you tick a drawer once the part is
+in your hand. A drawer you open and find empty is simply left unticked, and nothing is deducted for
+it. The box at the head of the column ticks the whole walk at once, and shows a dash while you are
+part-way through.
+
+**Take N off the shelf** then books out exactly what is ticked:
+
+- One movement per part in the log, not one per drawer. A part taken from two drawers left the
+  shelf once.
+- A line short of stock is picked as far as the shelf goes and marked with what is missing.
+  Nothing is taken for a line that is not in the bin at all.
+- Explicit box counts are rewritten. `C1:150 + C2:100` with 150 taken from C1 becomes
+  `C1:0 + C2:100` — the drawer is kept at zero rather than dropped, because the part still lives
+  there and will be refilled. A box written without a count says *where* the part is, not how many,
+  so it is left exactly as it was.
+- One **Undo**, which puts back the quantities and the box notation together.
+
 ## Reordering
 
 ![The order view](docs/Order.png)
@@ -275,13 +306,25 @@ to be ordered by part number.
 lot in at once. Parts already on the shelf have their quantity added; anything new is created and
 only needs a box.
 
-## Calculators
+## Calculators — now their own project
 
 ![The calculators](docs/Calc.png)
 
-Twenty-five bench formulas — dividers, regulators, MOSFET losses, wire gauge, RC and LC, resistor
-colour bands, SMD code decoding — each drawn as a schematic that updates as you type, so you can
-see what the numbers are describing.
+Twenty-nine bench formulas — dividers, regulators, MOSFET losses, wire gauge, RC and LC, resistor
+colour bands, SMD code decoding — each drawn as a schematic that updates as you type.
+
+They used to live inside this file, where they were roughly a third of it and touched the inventory
+exactly once. They are now **[Circuit Calcs](https://github.com/AJEngineering/circuit-calcs)**, a
+single HTML file of their own:
+
+**[ajengineering.github.io/circuit-calcs →](https://ajengineering.github.io/circuit-calcs/)**
+
+The **Calc** tab is a link that opens it in a new tab. Nothing is loaded across, so this page still
+makes no network request of its own — and if you work offline, download `calc.html` next to
+`inventory.html` and both work with the wire pulled out.
+
+The one thing the split cost: a computed value no longer tells you how many of that part are on
+your shelf. That note needed a shelf to look at.
 
 ## The log
 
