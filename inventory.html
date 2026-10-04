@@ -116,7 +116,7 @@ tr[data-catrow].dropabove td{box-shadow:inset 0 2px 0 var(--kapton)}
 tr[data-catrow].dropbelow td{box-shadow:inset 0 -2px 0 var(--kapton)}
 
 .rows{display:flex;flex-direction:column;gap:5px}
-.row{display:grid;grid-template-columns:56px 1fr auto;background:var(--card);
+.row{display:grid;grid-template-columns:56px 64px 1fr auto;background:var(--card);
      border:1px solid var(--rule);border-radius:2px}
 .row{cursor:pointer}
 .row:hover{border-color:var(--ink3)}
@@ -128,6 +128,15 @@ tr[data-catrow].dropbelow td{box-shadow:inset 0 -2px 0 var(--kapton)}
 .row .tab.none{background:var(--rule2)}
 .row .tab.none b{color:var(--ink3)}
 .row .body{padding:8px 12px;min-width:0}
+/* every picture lands in the same square whatever shape it was shot in:
+   contain keeps the whole part in view, the white ground hides the letterbox */
+.thumb{width:64px;height:100%;min-height:56px;display:flex;align-items:center;justify-content:center;
+       background:#fff;border-right:1px solid var(--rule);overflow:hidden}
+.thumb img{width:56px;height:56px;object-fit:contain;display:block}
+.thumb.none{background:var(--rule2);font-family:var(--mono);font-size:9px;color:var(--ink3);
+            text-align:center;line-height:1.2;padding:2px}
+.imgprev{width:160px;height:160px;object-fit:contain;background:#fff;border:1px solid var(--rule);
+         border-radius:2px;display:block;margin-top:6px}
 .line1{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
 .pn{font-family:var(--mono);font-size:13.5px;font-weight:600}
 .lcsc{font-family:var(--mono);font-size:11px;color:#fff;background:var(--ink2);padding:1px 5px;border-radius:2px}
@@ -343,7 +352,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "2.1.0";
+const APP_VERSION = "2.2.0";
 const REPO_URL = "https://github.com/AJEngineering/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -355,7 +364,7 @@ let lastSaved = null;
 let fileStamp = null;       /* lastModified seen by this tab, detects outside edits */
 let ghTimer = null;
 let ghPushPending = false;  /* a debounced push is waiting to go out */
-const ui = { q:"", cat:"", box:"", low:false, sort:"cat", view:"parts", editCat:null, moveCat:null, mfr:"", bomText:"", bomQty:1, bomRows:null, order:null, picked:{}, bomName:"", rcvText:"", receive:null, lcscBulk:null, lcscFinds:null };
+const ui = { conflicts:null, q:"", cat:"", box:"", low:false, sort:"cat", view:"parts", editCat:null, moveCat:null, mfr:"", bomText:"", bomQty:1, bomRows:null, order:null, picked:{}, bomName:"", rcvText:"", receive:null, lcscBulk:null, lcscFinds:null };
 
 const $  = (s,r=document)=>r.querySelector(s);
 const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -442,6 +451,7 @@ async function adoptFile(){
 function save(){
   db.updated = new Date().toISOString();
   const ok = localSave();
+  if(ghReady()){ ghEditSeq++; if(!gh.dirty){ gh.dirty = true; ghSave(); } }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(fileWrite, 400);
   if(gh.auto && ghReady() && ghPulled){
@@ -500,7 +510,9 @@ function chip(localOk){
     const when = gh.at ? new Date(gh.at).toTimeString().slice(0,8) : "";
     let state;
     if(ghPushPending) state = ' · <span style="color:var(--kapton)">syncing…</span>';
-    else if(!ghPulled) state = ' · <button class="linkish" data-view-go="data">pull once</button>';
+    else if(!ghPulled) state = ' · <button class="linkish" data-view-go="data">pull once</button>'+
+                               (gh.dirty?' · <span style="color:var(--kapton)">unpushed changes kept</span>':'');
+    else if(gh.dirty && !gh.auto) state = ' · <button class="linkish" data-view-go="data" style="color:var(--kapton)">unpushed changes · push in Data</button>';
     else if(gh.auto)   state = when ? ' · <span style="color:var(--ok)">synced ' + when + "</span>"
                                     : ' · <span style="color:var(--ok)">sync on</span>';
     else               state = ' · <button class="linkish" data-view-go="data">push in Data</button>';
@@ -537,8 +549,23 @@ function devLoad(){
 function devSave(v){ device = v || guessDevice(); try{ localStorage.setItem(DEV_KEY, device); }catch(e){} }
 
 const GH_KEY = "parts-bin-gh";
-let gh = {repo:"", path:"components.json", branch:"main", token:"", sha:null, auto:false, at:null};
+let gh = {repo:"", path:"components.json", branch:"main", token:"", sha:null, auto:false, at:null, dirty:false};
 let ghPulled = false;   /* auto push is armed only after a successful pull */
+
+/* An edit made here is not safe until GitHub has it. gh.dirty is kept with
+   the settings, so a tab closed (or a laptop shut) before its push went out
+   still knows on the next visit that it holds work GitHub never saw. The
+   copy last agreed with GitHub - the base - is kept in IndexedDB, and a pull
+   with work outstanding is merged three ways against it instead of simply
+   replacing what is here.                                                  */
+const GH_BASE = "gh:base";
+let ghEditSeq = 0;      /* bumped on every save; a push only clears dirty if none came in meanwhile */
+async function ghBaseSet(text){ await idbSet(GH_BASE, text); }
+async function ghBaseGet(){
+  const t = await idbGet(GH_BASE);
+  try{ const d = t ? JSON.parse(t) : null; return d && Array.isArray(d.parts) ? normalize(d) : null; }
+  catch(e){ return null; }
+}
 
 function ghLoad(){ try{ const t=localStorage.getItem(GH_KEY); if(t) Object.assign(gh, JSON.parse(t)); }catch(e){} }
 function ghSave(){ try{ localStorage.setItem(GH_KEY, JSON.stringify(gh)); }catch(e){} }
@@ -578,7 +605,85 @@ function mergeLog(mine, theirs){
   return out.slice(-2000);
 }
 
-async function ghPull(quiet){
+/* ------------------------------------------------------ three-way merge ---
+   base = what GitHub and this machine last agreed on, mine = this machine
+   now, theirs = GitHub now. A field changed on one side only takes that
+   side. A quantity changed on both sides takes both movements (theirs plus
+   what was taken or added here), so 100 -> 90 here and 100 -> 95 there
+   lands on 85. Any other field changed differently on both sides keeps this
+   machine's value and is listed under Data so it can be swapped.
+   Without a base (the first pull after this version arrived) every field
+   that differs is treated as a clash and this machine's value is kept.    */
+const jeq = (a,b)=> JSON.stringify(a===undefined?null:a) === JSON.stringify(b===undefined?null:b);
+
+function mergeById(B, M, T, both){
+  const haveBase = !!B;
+  const bm = new Map((B||[]).map(x=>[x.id,x])), tm = new Map((T||[]).map(x=>[x.id,x]));
+  const mm = new Map((M||[]).map(x=>[x.id,x]));
+  const out = [], twins = [];
+  for(const t of T||[]){
+    const b = bm.get(t.id), m = mm.get(t.id);
+    if(!m){
+      if(haveBase && b && jeq(b,t)) continue;   /* deleted here, untouched there */
+      out.push(t); continue;                     /* added there - or edited there, which beats a delete */
+    }
+    if(jeq(m,t)){ out.push(t); continue; }
+    if(haveBase && !b){ out.push(t); twins.push(m); continue; }   /* both added a new one under the same id */
+    out.push(both(b,m,t));
+  }
+  for(const m of M||[]){
+    if(tm.has(m.id)) continue;
+    const b = bm.get(m.id);
+    if(haveBase && b && jeq(b,m)) continue;     /* deleted there, untouched here */
+    out.push(m);                                 /* added here - or edited here */
+  }
+  /* two different parts that happened to take the same next number */
+  let next = out.reduce((n,x)=>Math.max(n, Number(x.id)||0), 0) + 1;
+  twins.forEach(m=> out.push(Object.assign({}, m, {id: next++})));
+  return out;
+}
+
+function mergeList(B, M, T){
+  const b = new Set(B||[]), m = new Set(M||[]), t = new Set(T||[]);
+  const out = (T||[]).filter(x=> !(B && b.has(x) && !m.has(x)));              /* removed here */
+  (M||[]).forEach(x=>{ if(!t.has(x) && !(B && b.has(x))) out.push(x); });       /* added here */
+  return out;
+}
+
+function merge3(base, mine, theirs){
+  const conflicts = [];
+  const out = Object.assign({}, theirs);
+  out.parts = mergeById(base && base.parts, mine.parts, theirs.parts, (b,m,t)=>{
+    const r = Object.assign({}, t);
+    for(const k of new Set(Object.keys(m).concat(Object.keys(t)))){
+      const bv = b ? b[k] : undefined, mv = m[k], tv = t[k];
+      if(jeq(mv,tv) || (b && jeq(mv,bv))){ r[k] = tv; continue; }
+      if(b && jeq(tv,bv)){ r[k] = mv; continue; }
+      if(k==="qty" && b){ r[k] = Math.max(0, Number(tv||0) + Number(mv||0) - Number(bv||0)); continue; }
+      r[k] = mv;
+      conflicts.push({id:m.id, k, mine:mv, theirs:tv});
+    }
+    return r;
+  });
+  const keepMine = (b,m,t)=> (b && jeq(m,b)) ? t : m;
+  out.boms    = mergeById(base && base.boms,    mine.boms,    theirs.boms,    keepMine);
+  out.pending = mergeById(base && base.pending, mine.pending, theirs.pending, keepMine);
+  out.categories = mergeList(base && base.categories, mine.categories, theirs.categories);
+  out.boxes      = mergeList(base && base.boxes,      mine.boxes,      theirs.boxes);
+  out.log = mergeLog(mine.log, theirs.log);
+  /* small maps such as the per-category alert levels: key by key */
+  const cm = {}, bc = (base && base.catMin) || {}, mc = mine.catMin || {}, tc = theirs.catMin || {};
+  for(const k of new Set(Object.keys(mc).concat(Object.keys(tc), Object.keys(bc)))){
+    const v = (base && jeq(mc[k], bc[k])) ? tc[k] : mc[k];
+    if(v!==undefined && v!==null) cm[k] = v;
+  }
+  out.catMin = cm;
+  out.updated = new Date().toISOString();
+  return {db: out, conflicts};
+}
+
+async function ghPull(quiet, opt){
+  opt = opt || {};
   if(!ghReady()) return toast("Fill in the repository and the token first");
   try{
     const r = await fetch(ghApi()+"?ref="+encodeURIComponent(gh.branch)+"&t="+Date.now(),
@@ -587,18 +692,39 @@ async function ghPull(quiet){
                         if(!quiet) toast("Nothing at that path yet — push to create it"); return; }
     if(!r.ok) throw new Error(await ghErr(r));
     const j = await r.json();
-    const next = JSON.parse(b64dec(j.content||""));
+    const text = b64dec(j.content||"");
+    const next = JSON.parse(text);
     if(!next || !Array.isArray(next.parts)) throw new Error("that file is not inventory data");
-    gh.sha = j.sha; gh.at = new Date().toISOString(); ghPulled = true; ghSave(); chip();
+    gh.sha = j.sha; gh.at = new Date().toISOString(); ghPulled = true;
+    /* work outstanding here: merge, never replace */
+    if(gh.dirty && db && db.parts.length){
+      const base = await ghBaseGet();
+      const m = merge3(base, db, normalize(next));
+      db = normalize(m.db);
+      ui.conflicts = m.conflicts.length ? m.conflicts : null;
+      await ghBaseSet(text);
+      ghSave(); localSave(); if(fileHandle) await fileWrite();
+      imgMiss.clear(); render();
+      const clash = m.conflicts.length ? " · "+m.conflicts.length+" clash"+(m.conflicts.length>1?"es":"")+" kept this machine's value, see Data" : "";
+      if(gh.auto && !opt.noPush){ ghPushPending = true; chip(); clearTimeout(ghTimer); ghTimer = setTimeout(()=>ghPush(true), 300); }
+      else chip();
+      if(!quiet || m.conflicts.length) toast("Merged GitHub's copy with the unpushed changes here"+clash);
+      return "merged";
+    }
+    gh.dirty = false; ghSave(); chip();
     const keep = db && db.log;
     db = normalize(next);
     db.log = mergeLog(keep, db.log);
+    ui.conflicts = null;
+    await ghBaseSet(text);
     localSave(); if(fileHandle) await fileWrite();
+    imgMiss.clear();
     render(); if(!quiet) toast("Pulled "+db.parts.length+" parts from GitHub");
-  }catch(e){ chip(); toast("Pull failed: "+e.message); }
+    return "pulled";
+  }catch(e){ chip(); toast("Pull failed: "+e.message); return "failed"; }
 }
 
-async function ghPush(quiet, force){
+async function ghPush(quiet, force, retried){
   if(!ghReady()) return toast("Fill in the repository and the token first");
   if(!ghPulled && !force) return toast("Pull once first, so this machine does not overwrite the others");
   try{
@@ -607,19 +733,30 @@ async function ghPush(quiet, force){
                             {headers:ghHead(), cache:"no-store"});
       gh.sha = c.ok ? (await c.json()).sha : null;
     }
+    const seq = ghEditSeq, text = JSON.stringify(db,null,1);
     const body = {branch: gh.branch,
                   message: "inventory · "+db.parts.length+" parts · "+new Date().toISOString().slice(0,19).replace("T"," "),
-                  content: b64enc(JSON.stringify(db,null,1))};
+                  content: b64enc(text)};
     if(gh.sha) body.sha = gh.sha;
     const r = await fetch(ghApi(), {method:"PUT",
       headers:Object.assign({"Content-Type":"application/json"}, ghHead()), body:JSON.stringify(body)});
     if(r.status===409 || r.status===422){
+      /* another machine got there first: fold its copy in, then try once more.
+         The changes here are kept - the old "Pull it" threw them away.      */
       ghPushPending = false; chip();
-      toast("GitHub holds a newer version than this machine", "Pull it", ()=>ghPull());
+      if(!retried && !force){
+        gh.dirty = true;
+        const how = await ghPull(true, {noPush:true});
+        if(how==="merged" || how==="pulled") return ghPush(quiet, false, true);
+        return;
+      }
+      toast("GitHub holds a newer version than this machine", "Pull and merge", ()=>ghPull());
       return;
     }
     if(!r.ok) throw new Error(await ghErr(r));
-    gh.sha = (await r.json()).content.sha; gh.at = new Date().toISOString(); ghPulled = true; ghSave();
+    gh.sha = (await r.json()).content.sha; gh.at = new Date().toISOString(); ghPulled = true;
+    if(seq===ghEditSeq) gh.dirty = false;
+    ghSave(); await ghBaseSet(text);
     ghPushPending = false; chip();
     render(); if(!quiet) toast("Pushed to GitHub");
   }catch(e){ ghPushPending = false; chip(); toast("Push failed: "+e.message); }
@@ -676,8 +813,45 @@ function nextFree(){
 }
 
 /* ------------------------------------------------------------------ query */
-const minOf = p => (p.min===null||p.min===undefined||p.min==="") ? 2 : Number(p.min);
-const isLow = p => Number(p.qty||0) <= minOf(p);
+/* a part's own alert level wins; without one, its category's; without that, 2 */
+const catMinOf = cat => { const v = db && db.catMin ? db.catMin[cat] : undefined;
+                          return (v===null||v===undefined||v==="") ? 2 : Number(v); };
+const minOf = p => (p.min===null||p.min===undefined||p.min==="") ? catMinOf(p.cat) : Number(p.min);
+
+/* Stock promised to a saved board. A board marked reserved holds its pieces
+   (per-board need x boards reserved) so the shelf does not offer them to the
+   next BOM; picking the board releases them. Cached per db.updated.        */
+let resCache = {at:null, map:new Map(), by:new Map()};
+const resKey = () => db.updated + "|" + db.parts.length + "|" +
+  (db.boms||[]).map(b=>b.id+":"+(b.reserve||0)+":"+String(b.text||"").length).join(",");
+function reservations(){
+  if(resCache.at === resKey()) return resCache;
+  const map = new Map(), by = new Map();
+  (db.boms||[]).filter(b=>Number(b.reserve||0)>0).forEach(b=>{
+    const m2 = new Map();
+    parseBom(b.text).forEach(r=>{
+      const m = matchBom(r);
+      if(!m.p) return;
+      const n = (r.need||1) * Number(b.reserve);
+      map.set(m.p.id, (map.get(m.p.id)||0) + n);
+      m2.set(m.p.id, (m2.get(m.p.id)||0) + n);
+    });
+    by.set(b.id, m2);
+  });
+  resCache = {at: resKey(), map, by};
+  return resCache;
+}
+/* reserved for every board except the one named - that board may use its own */
+function reservedOf(p, exceptBomId){
+  const r = reservations();
+  let n = r.map.get(p.id) || 0;
+  if(exceptBomId!=null && r.by.has(exceptBomId)) n -= (r.by.get(exceptBomId).get(p.id) || 0);
+  return Math.max(0, n);
+}
+const availOf = (p, exceptBomId) => Math.max(0, Number(p.qty||0) - reservedOf(p, exceptBomId));
+const isLow = p => availOf(p) <= minOf(p);
+/* the saved board the BOM tab currently has open, if any */
+const openBomId = () => { const b = (db.boms||[]).find(x=>x.name.toLowerCase()===String(ui.bomName||"").toLowerCase()); return b ? b.id : null; };
 
 function haystack(p){
   return [p.lcsc,p.mpn,p.val,p.pkg,p.mfr,p.desc,p.cat,p.box,p.src].join(" ").toUpperCase();
@@ -985,8 +1159,18 @@ function matchBom(row){
   return {p:null, how:""};
 }
 
+/* what one board costs from the prices on the shelf - lines with no price
+   are counted so the figure can say how much of it is known              */
+function bomCost(text){
+  const rows = parseBom(text);
+  let sum = 0, priced = 0;
+  rows.forEach(r=>{ const m = matchBom(r);
+    if(m.p && m.p.price!=null && isFinite(m.p.price)){ sum += m.p.price*(r.need||1); priced++; } });
+  return {sum, priced, lines: rows.length};
+}
+
 /* boards buildable from stock, for a saved BOM, without touching ui state */
-function bomCapacity(text){
+function bomCapacity(text, selfId){
   const rows = parseBom(text);
   if(!rows.length) return {n:0, lines:0, missing:0, short:0};
   let n = Infinity, missing = 0, short = 0;
@@ -994,7 +1178,7 @@ function bomCapacity(text){
     const m = matchBom(r);
     const per = r.need || 1;
     if(!m.p){ missing++; n = 0; return; }
-    const can = Math.floor(Number(m.p.qty||0)/per);
+    const can = Math.floor(availOf(m.p, selfId)/per);
     if(can < 1) short++;
     if(can < n) n = can;
   });
@@ -1004,10 +1188,11 @@ function bomCapacity(text){
 function runBom(){
   const boards = Math.max(1, Number(ui.bomQty)||1);
   ui.picked = {};   /* a fresh check is a fresh walk */
+  const self = openBomId();
   ui.bomRows = parseBom(ui.bomText).map(r=>{
     const m = matchBom(r);
     const need  = r.need * boards;
-    const have  = m.p ? Number(m.p.qty||0) : 0;
+    const have  = m.p ? availOf(m.p, self) : 0;
     return Object.assign({}, r, {need, have, short: Math.max(0, need-have),
                                  part:m.p, how:m.how, why:m.why||"",
                                  state: !m.p ? "missing" : (have>=need ? "ok" : "short")});
@@ -1021,9 +1206,10 @@ function runBom(){
    already multiplied out by the board count, so it is left alone.         */
 function rematchBom(){
   if(!ui.bomRows) return;
+  const self = openBomId();
   ui.bomRows = ui.bomRows.map(r=>{
     const m = matchBom(r);
-    const have = m.p ? Number(m.p.qty||0) : 0;
+    const have = m.p ? availOf(m.p, self) : 0;
     return Object.assign({}, r, {have, short: Math.max(0, r.need-have),
                                  part:m.p, how:m.how, why:m.why||"",
                                  state: !m.p ? "missing" : (have>=r.need ? "ok" : "short")});
@@ -1330,7 +1516,7 @@ function buildOrder(){
   db.parts.filter(isLow).forEach(p=>{
     /* top the shelf back up to twice the alert level, at least 10 pieces */
     const target = Math.max(minOf(p)*2, 10);
-    const q = Math.max(0, Math.ceil(target - Number(p.qty||0) - onOrder(p.id, p.lcsc, p.mpn)));
+    const q = Math.max(0, Math.ceil(target - availOf(p) - onOrder(p.id, p.lcsc, p.mpn)));
     add(p.id, {lcsc:p.lcsc||"", mpn:p.mpn||"", val:p.val||"", cat:p.cat, qty:q, why:"low stock",
                have:Number(p.qty||0), min:minOf(p), desc:p.desc||"", pkg:p.pkg||""});
   });
@@ -1613,8 +1799,249 @@ function lcscMap(r){
           /* the datasheet arrives with every lookup and used to be shown once
              and thrown away; keeping it is the whole cost of the feature   */
           ds:   String(r.pdfUrl||"").trim(),
+          /* the smallest-break price, as text so it fills a form field like the rest */
+          price: lcscUnitPrice(r),
           src:  "LCSC"};
 }
+/* ----------------------------------------------------------- part pictures --
+   A link to LCSC's photo would die the day they re-shoot the part, and LCSC's
+   photos are 900x900 with the part lost in a sea of white. So the picture is
+   fetched once, cut down to the part itself, centred in one fixed square and
+   kept as a file of its own:
+     - in this browser (IndexedDB), so it shows at once and offline;
+     - in the repository, next to the inventory file, as images/C1779.webp,
+       so every other machine finds it there - pushed as one commit per batch.
+   The part only carries the path, never the picture.                       */
+const IMG_SIZE = 256;            /* the square every picture is drawn into  */
+const IMG_FILL = 0.88;           /* the part fills this much of it          */
+const IMG_DIR  = "images/";
+const imgUrls  = new Map();      /* path -> object URL, so a redraw is free */
+const imgWait  = new Map();      /* path -> the lookup already under way    */
+const imgMiss  = new Set();      /* not found anywhere, this session        */
+let imgUnpushed = new Set();     /* saved here, not yet in the repository   */
+const imgIsUrl = v => /^(https?:|data:|blob:)/i.test(String(v||""));
+
+/* LCSC sends the photos as a list, largest first, and on older parts as one
+   or two single fields. Whichever is there is taken, as https.            */
+function lcscImage(r){
+  const list = Array.isArray(r.productImages) ? r.productImages : [];
+  const u = String(list[0] || r.productImageUrlBig || r.productImageUrl || "").trim();
+  return u.replace(/^\/\//,"https://").replace(/^http:/,"https:");
+}
+
+/* The bytes have to be readable, not just shown - a picture drawn from
+   another address without CORS taints the canvas and cannot be saved. So
+   the same walk as the part lookup: straight at LCSC, then the relays. The
+   reader relay is skipped: it hands back a description of the picture, not
+   the picture. A reply only counts if it decodes as an image.            */
+async function imgDownload(url){
+  const routes = [["direct",""]]
+    .concat(lcsc.relay?[["your relay", lcsc.relay]]:[])
+    .concat(demoRelay()?[["the demo relay", demoRelay()]]:[])
+    .concat(lcsc.public?LCSC_PUBLIC.filter(r=>!r[2]):[]);
+  const failed = [];
+  for(const [name,tpl] of routes){
+    const ctl = new AbortController(), timer = setTimeout(()=>ctl.abort(), 15000);
+    try{
+      const r = await fetch(lcscRoute(tpl, url), {signal:ctl.signal});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      return await createImageBitmap(await r.blob());
+    }catch(e){
+      failed.push(name+" "+(e.name==="AbortError" ? "timed out"
+                          : /failed to fetch|networkerror|load failed/i.test(e.message) ? "could not be reached"
+                          : e.name==="InvalidStateError" || /decode|source image/i.test(e.message) ? "did not send a picture"
+                          : e.message));
+    }finally{ clearTimeout(timer); }
+  }
+  throw new Error("the picture could not be fetched — "+failed.join("; "));
+}
+
+/* Find the part inside the white margin, then draw it centred in the
+   square at the same fill every time - so a 0402 and a TO-220 both sit at
+   the same size on screen, rather than one lost in its photo.             */
+async function imgSquare(bmp){
+  const W = bmp.width, H = bmp.height;
+  const k = Math.min(1, 400/Math.max(W,H));          /* scan a small copy */
+  const sw = Math.max(1,Math.round(W*k)), sh = Math.max(1,Math.round(H*k));
+  const sc = document.createElement("canvas"); sc.width = sw; sc.height = sh;
+  const sx = sc.getContext("2d", {willReadFrequently:true});
+  sx.fillStyle = "#fff"; sx.fillRect(0,0,sw,sh); sx.drawImage(bmp,0,0,sw,sh);
+  const px = sx.getImageData(0,0,sw,sh).data;
+  let x0 = sw, y0 = sh, x1 = -1, y1 = -1;
+  for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+    const i = (y*sw+x)*4;
+    if(px[i]<236 || px[i+1]<236 || px[i+2]<236){
+      if(x<x0) x0=x; if(x>x1) x1=x; if(y<y0) y0=y; if(y>y1) y1=y;
+    }
+  }
+  /* an all-white photo: keep the whole frame rather than nothing */
+  if(x1<0){ x0=0; y0=0; x1=sw-1; y1=sh-1; }
+  const cx = x0/k, cy = y0/k, cw = (x1-x0+1)/k, ch = (y1-y0+1)/k;
+  const out = document.createElement("canvas"); out.width = out.height = IMG_SIZE;
+  const o = out.getContext("2d");
+  o.fillStyle = "#fff"; o.fillRect(0,0,IMG_SIZE,IMG_SIZE);
+  o.imageSmoothingQuality = "high";
+  const f = IMG_SIZE*IMG_FILL/Math.max(cw,ch);
+  const dw = cw*f, dh = ch*f;
+  o.drawImage(bmp, cx,cy,cw,ch, (IMG_SIZE-dw)/2,(IMG_SIZE-dh)/2, dw,dh);
+  const enc = (type,q) => new Promise(res=>out.toBlob(res, type, q));
+  /* Safari will not write WebP and quietly hands back a PNG - JPEG then,
+     which is a quarter of the size of that PNG on a white ground         */
+  let b = await enc("image/webp", 0.85);
+  if(!b || b.type!=="image/webp") b = await enc("image/jpeg", 0.88);
+  return b;
+}
+
+async function imgKeep(path, blob, unpushed){
+  await idbSet("img:"+path, blob);
+  if(imgUrls.has(path)) URL.revokeObjectURL(imgUrls.get(path));
+  imgUrls.set(path, URL.createObjectURL(blob));
+  imgMiss.delete(path);
+  if(unpushed){ imgUnpushed.add(path); await idbSet("img:unpushed", [...imgUnpushed]); }
+}
+
+/* LCSC code + photo address in, the path of the saved square out */
+async function imgSave(code, url){
+  const blob = await imgSquare(await imgDownload(url));
+  const path = IMG_DIR + code + (blob.type==="image/webp" ? ".webp" : ".jpg");
+  await imgKeep(path, blob, true);
+  return path;
+}
+
+/* --- the repository side. The contents API is one commit per file, which
+   for a whole bin is hundreds of commits; the git data API writes them all
+   as one. The inventory file is not touched, so its own sha stays valid. */
+function ghDir(){ const i = gh.path.lastIndexOf("/"); return i<0 ? "" : gh.path.slice(0,i+1); }
+function ghGit(){ return "https://api.github.com/repos/"+gh.repo+"/git/"; }
+function ghRef(){ return "heads/"+gh.branch.split("/").map(encodeURIComponent).join("/"); }
+async function blobB64(blob){
+  const b = new Uint8Array(await blob.arrayBuffer());
+  let s = "";
+  for(let i=0;i<b.length;i+=0x8000) s += String.fromCharCode.apply(null, b.subarray(i,i+0x8000));
+  return btoa(s);
+}
+async function ghJson(url, method, body){
+  const r = await fetch(url, {method:method||"GET", cache:"no-store",
+    headers:Object.assign({"Content-Type":"application/json"}, ghHead()),
+    body: body ? JSON.stringify(body) : undefined});
+  if(!r.ok){ const e = new Error(await ghErr(r)); e.status = r.status; throw e; }
+  return r.json();
+}
+
+/* Push every picture still waiting. Another machine pushing in between
+   makes the ref update fail as not a fast-forward - the blobs are already
+   up, so it is only the tree and the commit that are made again.          */
+async function imgPush(){
+  if(!ghReady() || !imgUnpushed.size) return 0;
+  const paths = [...imgUnpushed];
+  const tree = [];
+  for(const path of paths){
+    const blob = await idbGet("img:"+path);
+    if(!blob){ imgUnpushed.delete(path); continue; }
+    const b = await ghJson(ghGit()+"blobs", "POST", {content: await blobB64(blob), encoding:"base64"});
+    tree.push({path: ghDir()+path, mode:"100644", type:"blob", sha:b.sha});
+  }
+  if(tree.length){
+    for(let attempt=0;;attempt++){
+      const head = await ghJson(ghGit()+"ref/"+ghRef());
+      const base = await ghJson(ghGit()+"commits/"+head.object.sha);
+      const t = await ghJson(ghGit()+"trees", "POST", {base_tree: base.tree.sha, tree});
+      const c = await ghJson(ghGit()+"commits", "POST",
+        {message:"images · "+tree.length+" part picture"+(tree.length>1?"s":""), tree:t.sha, parents:[head.object.sha]});
+      try{ await ghJson(ghGit()+"refs/"+ghRef(), "PATCH", {sha:c.sha}); break; }
+      catch(e){ if(e.status!==422 || attempt>=2) throw e; }
+    }
+  }
+  paths.forEach(p=>imgUnpushed.delete(p));
+  await idbSet("img:unpushed", [...imgUnpushed]);
+  return tree.length;
+}
+
+/* A path this browser has never seen is read from the repository once and
+   kept; four at a time, so opening a bin of 400 parts on a new machine
+   does not fire 400 requests in the same instant.                         */
+let imgSlots = 4; const imgQueue = [];
+function imgLimit(fn){
+  return new Promise((res,rej)=>{
+    const go = ()=>{ imgSlots--; fn().then(res,rej).finally(()=>{ imgSlots++; const n = imgQueue.shift(); if(n) n(); }); };
+    imgSlots>0 ? go() : imgQueue.push(go);
+  });
+}
+async function ghGetImage(path){
+  const r = await fetch("https://api.github.com/repos/"+gh.repo+"/contents/"+
+      (ghDir()+path).split("/").map(encodeURIComponent).join("/")+"?ref="+encodeURIComponent(gh.branch),
+    {headers:Object.assign({}, ghHead(), {Accept:"application/vnd.github.raw"})});
+  return r.ok ? r.blob() : null;
+}
+function imgResolve(path){
+  if(imgUrls.has(path)) return Promise.resolve(imgUrls.get(path));
+  if(imgMiss.has(path)) return Promise.resolve("");
+  if(!imgWait.has(path)) imgWait.set(path, (async()=>{
+    let blob = await idbGet("img:"+path);
+    if(!blob && ghReady()){
+      blob = await imgLimit(()=>ghGetImage(path)).catch(()=>null);
+      if(blob) await idbSet("img:"+path, blob);
+    }
+    imgWait.delete(path);
+    if(!blob){ imgMiss.add(path); return ""; }
+    const u = URL.createObjectURL(blob); imgUrls.set(path, u); return u;
+  })());
+  return imgWait.get(path);
+}
+function imgDead(el){
+  const t = el.parentNode;
+  if(t && t.classList.contains("thumb")){ t.classList.add("none"); t.textContent = el.dataset.pkg||""; }
+  else el.hidden = true;
+}
+/* run after every redraw: a saved picture has no address until it is
+   looked up, so the row is drawn first and the picture put in after      */
+function imgHydrate(root){
+  for(const el of $$("img[data-img]", root||document)){
+    imgResolve(el.dataset.img).then(u=>{ if(u) el.src = u; else imgDead(el); });
+  }
+}
+async function imgBoot(){
+  const u = await idbGet("img:unpushed");
+  if(Array.isArray(u)) imgUnpushed = new Set(u);
+}
+
+/* --- many at once: every part with an LCSC code and no picture. Each one
+   is written onto its part as it lands, and the repository gets the lot in
+   one commit at the end - or at Stop, so nothing fetched is lost.        */
+let imgBulkStop = false;
+function imgGapList(){ return db.parts.filter(p=>lcscCode(p.lcsc) && !String(p.img||"").trim()); }
+async function imgBulkRun(){
+  const list = imgGapList(), w = () => $("#imgBulkWork");
+  imgBulkStop = false;
+  const failed = []; let done = 0, got = 0;
+  for(const p of list){
+    if(imgBulkStop) break;
+    if(w()) w().innerHTML = `<div class="lcscnote" style="margin-top:10px">Fetching <b>${done+1}</b> of ${list.length}
+        · ${got} saved${failed.length?` · <span class="bad">${failed.length} failed</span>`:""}…</div>
+      <div class="sheetbar"><button class="btn ghost" id="imgBulkHalt">Stop</button></div>`;
+    try{
+      const code = lcscCode(p.lcsc);
+      const src = lcscImage(await lcscFetch(code));
+      if(!src) throw new Error("LCSC has no picture of it");
+      p.img = await imgSave(code, src); got++;
+    }catch(e){ failed.push({p, why:e.message}); }
+    done++;
+    if(done < list.length && !imgBulkStop) await new Promise(r=>setTimeout(r,250));
+  }
+  if(got){ logAdd({k:"edit", mpn:"("+got+" parts)", cat:"pictures from LCSC"}); save(); }
+  let pushed = "";
+  if(got && ghReady()){
+    if(w()) w().innerHTML = `<div class="lcscnote" style="margin-top:10px">Pushing ${imgUnpushed.size} pictures to ${esc(gh.repo)}…</div>`;
+    try{ pushed = ` · ${await imgPush()} pushed to ${esc(gh.repo)}`; }
+    catch(e){ pushed = ` · <span class="bad">push failed: ${esc(e.message)}</span> — they are kept here and go with the next push`; }
+  }
+  render();
+  if(w()) w().innerHTML = `<div class="lcscnote" style="margin-top:10px">Fetched ${done} of ${list.length}${
+      imgBulkStop?" before stopping":""} · <b>${got} saved</b>${pushed}${
+      failed.length?`<br><span class="bad">${failed.length} without a picture:</span> ${
+        failed.slice(0,12).map(f=>esc(f.p.lcsc)+" ("+esc(f.why)+")").join(", ")}${failed.length>12?" …":""}`:""}</div>`;
+}
+
 /* -------------------------------------------- filling many parts at once --
    Every part that carries an LCSC code but has a field left blank can be read
    in one pass. The rule is the one the single lookup uses - a blank is filled,
@@ -1625,8 +2052,8 @@ function lcscMap(r){
    or a MOSFET has no value and never will, so asking again every time would
    burn a request per part forever. Only the fields LCSC always answers with
    decide whether a part is worth asking about.                              */
-const LCSC_GAP_KEYS  = ["mpn","mfr","pkg","desc","cat","ds"];
-const LCSC_FILL_KEYS = ["mpn","mfr","pkg","val","desc","cat","src","ds"];
+const LCSC_GAP_KEYS  = ["mpn","mfr","pkg","desc","cat","ds","price"];
+const LCSC_FILL_KEYS = ["mpn","mfr","pkg","val","desc","cat","src","ds","price"];
 function lcscGapList(){
   return db.parts.filter(p => lcscCode(p.lcsc) &&
     LCSC_GAP_KEYS.some(k => !String(p[k]||"").trim()));
@@ -1682,7 +2109,7 @@ function lcscBulkShow(){
     return;
   }
   const fieldName = {mpn:"part number", mfr:"manufacturer", pkg:"package", val:"value",
-                     desc:"description", cat:"category", src:"supplier"};
+                     desc:"description", cat:"category", src:"supplier", ds:"datasheet", price:"price $"};
   w.innerHTML = `<table style="margin-top:12px"><thead><tr><th>LCSC</th><th>Part</th>
       <th>Would fill</th></tr></thead><tbody>
       ${b.rows.slice(0,60).map(r=>`<tr>
@@ -1707,7 +2134,7 @@ function lcscBulkApply(){
   const before = b.rows.map(r=>({p:r.p,
     was:Object.fromEntries(Object.keys(r.fills).map(k=>[k, r.p[k]]))}));
   const n = b.rows.length;
-  b.rows.forEach(r=>Object.assign(r.p, r.fills));
+  b.rows.forEach(r=>{ Object.assign(r.p, r.fills); if(r.fills.price!==undefined) r.p.price = Number(r.fills.price); });
   logAdd({k:"edit", mpn:"("+n+" parts)", cat:"filled from LCSC"});
   ui.lcscBulk = null;
   save(); render();
@@ -1715,6 +2142,73 @@ function lcscBulkApply(){
     before.forEach(x=>Object.assign(x.p, x.was));
     save(); render();
   });
+}
+
+/* ------------------------------------- the same, many parts at a time ---- */
+function lcscNoCodeList(){ return db.parts.filter(p=>!lcscCode(p.lcsc) && String(p.mpn||"").trim().length>=4); }
+let lcscFindStop = false;
+async function lcscFindBulk(){
+  const list = lcscNoCodeList();
+  lcscFindStop = false; ui.findBulk = null;
+  const rows = [], miss = [];
+  let done = 0;
+  for(const p of list){
+    if(lcscFindStop) break;
+    const w = $("#lcscFindWork");
+    if(w) w.innerHTML = `<div class="lcscnote" style="margin-top:10px">Searching <b>${done+1}</b> of ${list.length}
+        · ${rows.length} found${miss.length?` · ${miss.length} not found`:""}…</div>
+      <div class="sheetbar"><button class="btn ghost" id="lcscFindHalt">Stop</button></div>`;
+    try{
+      const hits = await lcscFind(p.mpn);
+      const hit = hits.find(h=>h.exact);
+      if(!hit || db.parts.some(x=>x!==p && lcscCode(x.lcsc)===hit.code)) miss.push(p);
+      else {
+        const got = lcscMap(hit.r), fills = {lcsc: hit.code};
+        for(const k of LCSC_FILL_KEYS){
+          if(k==="src" || k==="mpn") continue;
+          const v = got[k];
+          if(!v || String(p[k]==null?"":p[k]).trim()) continue;
+          if(k==="cat" && !db.categories.includes(v)) continue;
+          fills[k] = v;
+        }
+        rows.push({p, fills});
+      }
+    }catch(e){ miss.push(p); }
+    done++;
+    if(done < list.length && !lcscFindStop) await new Promise(r=>setTimeout(r,400));
+  }
+  ui.findBulk = {rows, miss, done, total:list.length, stopped:lcscFindStop};
+  lcscFindShow();
+}
+function lcscFindShow(){
+  const b = ui.findBulk, w = $("#lcscFindWork");
+  if(!w || !b) return;
+  const tail = `Searched ${b.done} of ${b.total}${b.stopped?" before stopping":""} · ${b.rows.length} exact match${b.rows.length===1?"":"es"}${
+      b.miss.length?` · ${b.miss.length} not on LCSC under that exact number`:""}.`;
+  if(!b.rows.length){
+    w.innerHTML = `<div class="lcscnote" style="margin-top:10px">${tail}</div>
+      <div class="sheetbar"><button class="btn ghost" id="lcscFindCancel">Close</button></div>`;
+    return;
+  }
+  w.innerHTML = `<table style="margin-top:12px"><thead><tr><th>Part number</th><th>LCSC</th><th>Also fills</th></tr></thead><tbody>
+      ${b.rows.slice(0,80).map(r=>`<tr><td class="m">${esc(r.p.mpn)}</td>
+        <td class="m"><b style="color:var(--kapton)">${esc(r.fills.lcsc)}</b></td>
+        <td style="font-size:11.5px">${esc(Object.keys(r.fills).filter(k=>k!=="lcsc").join(", ")||"—")}</td></tr>`).join("")}
+      ${b.rows.length>80?`<tr><td colspan="3" style="color:var(--ink3)">…and ${b.rows.length-80} more</td></tr>`:""}
+    </tbody></table>
+    <div class="lcscnote" style="margin-top:8px">${tail}</div>
+    <div class="sheetbar"><button class="btn" id="lcscFindApply">Write ${b.rows.length} codes in</button>
+      <button class="btn ghost" id="lcscFindCancel">Cancel</button></div>`;
+}
+function lcscFindApply(){
+  const b = ui.findBulk;
+  if(!b || !b.rows.length) return;
+  const before = b.rows.map(r=>({p:r.p, was:Object.fromEntries(Object.keys(r.fills).map(k=>[k, r.p[k]]))}));
+  b.rows.forEach(r=>{ Object.assign(r.p, r.fills); if(r.fills.price!==undefined) r.p.price = Number(r.fills.price); });
+  logAdd({k:"edit", mpn:"("+b.rows.length+" parts)", cat:"LCSC code found by part number"});
+  const n = b.rows.length;
+  ui.findBulk = null; save(); render();
+  toast("Wrote "+n+" LCSC codes in", "Undo", ()=>{ before.forEach(x=>Object.assign(x.p, x.was)); save(); render(); });
 }
 
 /* ------------------------------------------ finding a code from a part no -
@@ -1835,6 +2329,12 @@ async function lcscFind(mpn){
   return out;
 }
 
+function lcscUnitPrice(r){
+  const l = Array.isArray(r.productPriceList) ? r.productPriceList : [];
+  if(!l.length) return "";
+  const p = Number(l[0].usdPrice != null ? l[0].usdPrice : l[0].productPrice);
+  return isFinite(p) && p>0 ? String(+p.toFixed(5)) : "";
+}
 function lcscPrice(r){
   const l = Array.isArray(r.productPriceList) ? r.productPriceList : [];
   if(!l.length) return "";
@@ -1868,6 +2368,8 @@ function render(){
   /* "part of the walk is ticked" has no HTML attribute - it can only be set
      on the element, so it has to be put back after every redraw          */
   if(ui.view==="bom") pickSync();
+  if(ui.view==="data" && ui.findBulk) lcscFindShow();
+  imgHydrate(s);
 }
 
 function renderRail(){
@@ -1933,6 +2435,16 @@ function dsLink(p){
   return "";
 }
 
+/* A part with no picture, or one that cannot be found, keeps the same
+   square with its package written in it, so the column never jumps.     */
+function thumbHTML(p){
+  const img = String(p.img||"").trim();
+  if(!img) return `<div class="thumb none">${esc(p.pkg||"")}</div>`;
+  const at = imgIsUrl(img) ? `src="${esc(img)}" referrerpolicy="no-referrer"` : `data-img="${esc(img)}"`;
+  return `<div class="thumb"><img ${at} alt="" loading="lazy" decoding="async" width="56" height="56"
+    data-pkg="${esc(p.pkg||"")}" onerror="imgDead(this)"></div>`;
+}
+
 function rowHTML(p){
   const toks = partBoxes(p);
   const key  = toks.length? toks.map(t=>t.key).join("+") : "—";
@@ -1941,6 +2453,7 @@ function rowHTML(p){
   const mfr  = p.mfr ? `<button class="mfrtag" data-mfr="${esc(p.mfr)}" title="show every ${esc(p.mfr)} part">${esc(p.mfr)}</button>` : "";
   return `<div class="row${low?" low":""}" data-id="${p.id}">
     <div class="tab${toks.length?"":" none"}"><b>${esc(toks.length?toks[0].key:"—")}</b>${toks.length>1?`<small>+${toks.length-1}</small>`:`<small>box</small>`}</div>
+    ${thumbHTML(p)}
     <div class="body">
       <div class="line1">
         <span class="pn">${esc(p.mpn||"(no part number)")}</span>
@@ -1952,7 +2465,8 @@ function rowHTML(p){
       <div class="line2">${bits.map(b=>`<em>${esc(b)}</em>`).join('<span class="dot">·</span>')}</div>
     </div>
     <div class="qty">
-      <span class="qnum" title="minimum ${minOf(p)}">${num(p.qty||0)}</span>
+      <span class="qnum" title="minimum ${minOf(p)}${reservedOf(p)?" · "+reservedOf(p)+" reserved for saved boards, "+availOf(p)+" free":""}">${num(p.qty||0)}${
+        reservedOf(p)?`<small style="display:block;font-size:10px;color:var(--kapton);font-weight:600">${num(reservedOf(p))} held</small>`:""}</span>
       <button class="step" data-act="dec" title="use one">−</button>
       <button class="step" data-act="inc" title="add one">+</button>
       <button class="more" data-act="edit" title="Edit or delete this part">✎</button>
@@ -2046,14 +2560,21 @@ function viewBom(){
   const saved = (db.boms||[]);
   const board = saved.length ? `<div class="panel"><h2>Saved boards</h2>
       <p>Each line is checked against the shelf as it stands right now.</p>
+      <p>Reserve a board to hold its parts on the shelf: they stop counting as free for every other board and for
+         low stock, until the board is picked or released.</p>
       <table><thead><tr><th>Board</th><th class="num">Lines</th><th class="num">Buildable now</th>
-        <th class="num">Missing</th><th></th></tr></thead><tbody>
+        <th class="num">Missing</th><th class="num">Cost / board</th><th class="num">Reserved</th><th></th></tr></thead><tbody>
       ${saved.map(b=>{
-        const cap = bomCapacity(b.text);
+        const cap = bomCapacity(b.text, b.id);
+        const cost = bomCost(b.text);
         return `<tr><td>${esc(b.name)}<br><span style="color:var(--ink3);font-size:11px">${esc((b.updated||"").slice(0,10))}</span></td>
           <td class="num m">${cap.lines}</td>
           <td class="num m" style="font-size:16px;font-weight:600;color:${cap.n?"var(--ok)":"var(--alert)"}">${cap.n}</td>
           <td class="num m" style="color:${cap.missing?"var(--alert)":"var(--ink3)"}">${cap.missing||"\u2014"}</td>
+          <td class="num m" title="${cost.priced} of ${cost.lines} lines priced">${cost.priced?"$"+cost.sum.toFixed(2)+(cost.priced<cost.lines?"*":""):"\u2014"}</td>
+          <td class="num m">${Number(b.reserve||0)
+            ? `<b style="color:var(--kapton)">${b.reserve}</b> · <button class="linkish" data-bomrel="${b.id}">release</button>`
+            : `<button class="linkish" data-bomres="${b.id}">reserve</button>`}</td>
           <td style="text-align:right;white-space:nowrap">
             <button class="linkish" data-bomload="${b.id}">open</button> \u00b7
             <button class="linkish" style="color:var(--alert)" data-bomdel="${b.id}">delete</button></td></tr>`;
@@ -2453,12 +2974,16 @@ function viewData(){
   const lcscCoded = db.parts.filter(p=>lcscCode(p.lcsc)).length;
   const gaps = lcscGapList().length;
   const fsa = !!window.showSaveFilePicker;
+  const pricedParts = db.parts.filter(p=>p.price!=null);
+  const priced = pricedParts.length, worth = pricedParts.reduce((s,p)=>s+p.price*Number(p.qty||0),0);
+  const noCode = lcscNoCodeList().length;
   return `<div class="stats">
       <div class="stat"><b>${db.parts.length}</b><span class="lab">parts</span></div>
       <div class="stat"><b>${num(pcs)}</b><span class="lab">pieces</span></div>
       <div class="stat"><b>${boxStats().length}</b><span class="lab">boxes</span></div>
       <div class="stat"><b>${db.categories.length}</b><span class="lab">categories</span></div>
       <div class="stat"><b style="color:var(--alert)">${low}</b><span class="lab">low stock</span></div>
+      <div class="stat" title="${priced} of ${db.parts.length} parts carry a price"><b>${priced?"$"+num(Math.round(worth)):"\u2014"}</b><span class="lab">stock value${priced<db.parts.length?" ("+priced+" priced)":""}</span></div>
     </div>
     <div class="panel"><h2>Data file</h2>
       <p>${fsa
@@ -2543,6 +3068,16 @@ function viewData(){
         <button class="btn ghost" id="lcscBulkScan"${gaps?"":" disabled"}>Read ${gaps} parts off LCSC</button>
       </div>
       <div id="lcscBulkWork"></div>
+      <h2 style="margin-top:20px">Parts with a part number but no LCSC code</h2>
+      <p>Each part number is searched on LCSC and every hit read back. Only a hit whose part number is <b>exactly</b>
+         the one on the shelf is offered — a near neighbour with another tolerance is never written in. The code and any
+         empty fields are filled; nothing you wrote is changed, and the supplier is left alone, since you may have
+         bought it elsewhere. Slow on purpose: one part at a time.</p>
+      <div class="kv"><b>part number, no LCSC code</b><span>${noCode}</span></div>
+      <div class="sheetbar" style="margin-top:10px">
+        <button class="btn ghost" id="lcscFindScan"${noCode?"":" disabled"}>Look up ${noCode} on LCSC</button>
+      </div>
+      <div id="lcscFindWork"></div>
       ${demoRelay()?`<p style="border-left:3px solid var(--kapton);padding-left:11px">This page is the project's own
          demo, and it is using a relay the project pays for, so that trying it out works first time. A copy you
          download does not — it falls back to the free public relays, which are slower and go quiet now and then.
@@ -2559,6 +3094,21 @@ function viewData(){
           <input type="checkbox" id="lcscPublic"${lcsc.public?" checked":""}> keep trying the built-in relays too</label>
       </details>
     </div>
+    <div class="panel"><h2>Pictures</h2>
+      <p>Each part's photo is fetched from LCSC once, trimmed to the part, drawn into a ${IMG_SIZE}×${IMG_SIZE} square
+         and saved as <span class="pn">${esc(ghDir()+IMG_DIR)}C1779.webp</span> beside the inventory file — in this
+         browser at once, and in the repository with the next push. Other machines read it from there.
+         A part without an LCSC code can take a link pasted into its Picture field.</p>
+      <div class="kv">
+        <b>parts with a picture</b><span>${db.parts.filter(p=>String(p.img||"").trim()).length}</span>
+        <b>LCSC code but no picture</b><span>${imgGapList().length}</span>
+        <b>saved here, not yet pushed</b><span${imgUnpushed.size?' style="color:var(--kapton);font-weight:600"':""}>${imgUnpushed.size}</span></div>
+      <div class="sheetbar" style="margin-top:10px">
+        <button class="btn ghost" id="imgBulkGo"${imgGapList().length?"":" disabled"}>Fetch ${imgGapList().length} pictures</button>
+        ${imgUnpushed.size && ghReady()?`<button class="btn ghost" id="imgPushGo">Push ${imgUnpushed.size} to ${esc(gh.repo)}</button>`:""}
+      </div>
+      <div id="imgBulkWork"></div>
+    </div>
     <div class="panel"><h2>This computer</h2>
       <p>Every movement is stamped with this name so the log tells you which machine did what.
          The name stays on this computer and is never synced.</p>
@@ -2571,8 +3121,10 @@ function viewData(){
     <div class="panel"><h2>Sync across computers</h2>
       <p>One private repository holds <b>${esc(gh.path||"components.json")}</b>. Every push is a commit, so GitHub
          keeps the history and refuses a push that would overwrite a newer one.
-         Parts follow the last machine that pushed; the movement log is merged, so entries from
-         other computers are never lost.</p>
+         When two computers changed the inventory between syncs, the copies are merged part by part and field
+         by field: quantities add both movements up, the movement log keeps every entry, and an edit made here
+         is never thrown away because another machine pushed first.</p>
+      ${conflictPanel()}
       <div class="form" style="grid-template-columns:1fr 1fr">
         <div class="f"><label class="lab">Repository</label><input id="ghRepo" value="${esc(gh.repo)}" placeholder="abdullah/my-parts" spellcheck="false"></div>
         <div class="f"><label class="lab">File path</label><input id="ghPath" value="${esc(gh.path)}" placeholder="components.json" spellcheck="false"></div>
@@ -2591,6 +3143,7 @@ function viewData(){
       <div class="kv">
         <b>last sync</b><span>${gh.at?esc(gh.at.replace("T"," ").slice(0,19)):"never"}</span>
         <b>state</b><span>${ghReady()?(ghPulled?"pulled this session · pushes armed":"pull once before this machine may push"):"not configured"}</span>
+        <b>this machine</b><span${gh.dirty?' style="color:var(--kapton);font-weight:600"':""}>${gh.dirty?"holds changes GitHub has not seen yet":"in step with its last sync"}</span>
         ${gh.repo?`<b>on github</b><span><a class="linkish" target="_blank" rel="noreferrer" href="https://github.com/${esc(gh.repo)}/commits/${esc(gh.branch)}/${esc(gh.path)}">commit history</a></span>`:""}
       </div>
       <p style="color:var(--ink3);font-size:12px">The token stays in this browser, never inside the inventory file. Anyone using this
@@ -2609,16 +3162,21 @@ function viewData(){
         ${db.categories.length>1?`<button class="btn ghost" id="catSortAz">Sort A to Z</button>
           <button class="btn ghost" id="catSortUse" title="most parts first">Sort by how full they are</button>`:""}
       </div>
-      <table style="margin-top:12px"><thead><tr><th style="width:1%"></th><th>Category</th><th class="num">Parts</th><th></th></tr></thead><tbody>
+      <p>The <b>alert at</b> column is the low-stock level for every part in that category that has no level of its
+         own. ${db.parts.filter(p=>p.min===null).length} of ${db.parts.length} parts have none, so this is what decides
+         whether they show up as low and land on the Order list. Empty means 2.</p>
+      <div class="sheetbar"><button class="btn ghost" id="catMinSuggest">Fill the empty ones with suggested levels</button>
+        <span style="color:var(--ink3);font-size:12px">passives 50 · inductors and discretes 20 · connectors 10 · ICs 5 · modules 2</span></div>
+      <table style="margin-top:12px"><thead><tr><th style="width:1%"></th><th>Category</th><th class="num">Parts</th><th class="num">Alert at</th><th></th></tr></thead><tbody>
       ${db.categories.map((c,i)=>{
         const n = db.parts.filter(p=>p.cat===c).length;
-        if(ui.moveCat===c) return `<tr><td colspan="4">
+        if(ui.moveCat===c) return `<tr><td colspan="5">
           <div class="sheetbar" style="margin:0">
             <span class="lab">Move ${n} parts to</span>
             <select class="sel" id="moveTarget">${db.categories.filter(x=>x!==c).map(x=>`<option>${esc(x)}</option>`).join("")}</select>
             <button class="btn" data-catmove="${esc(c)}">Move them</button>
             <button class="btn ghost" id="catCancel">Cancel</button></div></td></tr>`;
-        if(ui.editCat===c) return `<tr><td colspan="4">
+        if(ui.editCat===c) return `<tr><td colspan="5">
           <div class="sheetbar" style="margin:0">
             <input id="catRenameField" value="${esc(c)}" style="border:1px solid var(--kapton);background:#fff;padding:6px 8px;font-family:var(--mono);font-size:13px;flex:1;max-width:280px">
             <button class="btn" data-catsave="${esc(c)}">Save name</button>
@@ -2628,6 +3186,9 @@ function viewData(){
             ><button class="ord" data-catup="${esc(c)}" title="move up"${i===0?" disabled":""}>&#9650;</button
             ><button class="ord" data-catdn="${esc(c)}" title="move down"${i===db.categories.length-1?" disabled":""}>&#9660;</button>
           </td><td>${esc(c)}</td><td class="num m">${n}</td>
+          <td class="num"><input class="catmin" data-catmin="${esc(c)}" type="number" min="0" step="1"
+            value="${db.catMin&&db.catMin[c]!=null?db.catMin[c]:""}" placeholder="2"
+            style="width:64px;border:1px solid var(--rule);background:var(--paper);padding:3px 5px;font-family:var(--mono);font-size:12.5px;text-align:right"></td>
           <td style="text-align:right;white-space:nowrap">
             <button class="linkish" data-catren="${esc(c)}">rename</button>
             ${n?` · <button class="linkish" data-catmoveask="${esc(c)}">move parts out</button>`
@@ -2654,6 +3215,36 @@ function viewData(){
          Exact split: <span class="pn">C1:25 + C6:20</span>. The box view uses the same rules.</p></div>
     <div class="panel"><h2>Keyboard</h2>
       <div class="kv"><b>/</b><span>jump to search</span><b>Esc</b><span>clear search, close the editor</span></div></div>`;
+}
+
+/* starting levels by what a category holds, mirroring reorder/make_reorder.py */
+const CAT_MIN_RULES = [
+  [/resistor|capacitor/i, 50],
+  [/inductor|ferrite|bead/i, 20],
+  [/diode|zener|tvs|esd|led|bjt|transistor|mosfet|fuse|rectifier|varistor|crystal/i, 20],
+  [/terminal|switch|connector|header|holder|usb/i, 10],
+  [/module|lcd|hmi|display|battery|buzzer|relay|transformer|potentiometer/i, 2]
+];
+const suggestCatMin = c => { const r = CAT_MIN_RULES.find(x=>x[0].test(c)); return r ? r[1] : 5; };
+
+/* fields both machines changed differently in one merge - this machine's
+   value was kept; one click per line, or one for all, takes GitHub's     */
+function conflictPanel(){
+  const c = ui.conflicts;
+  if(!c || !c.length) return "";
+  const show = v => v===null||v===undefined||v==="" ? "—" : String(v);
+  return `<div style="border-left:3px solid var(--kapton);padding-left:11px;margin:10px 0">
+      <p><b>${c.length} field${c.length>1?"s were":" was"} changed differently on both computers.</b>
+         This machine's value was kept. Take GitHub's where it was the right one.</p>
+      <table><thead><tr><th>Part</th><th>Field</th><th>Here (kept)</th><th>On GitHub</th><th></th></tr></thead><tbody>
+      ${c.slice(0,40).map((x,i)=>{ const p = findPart(x.id);
+        return `<tr><td class="m">${esc(p?(p.mpn||p.lcsc||p.val||"#"+p.id):"#"+x.id)}</td><td>${esc(x.k)}</td>
+          <td class="m">${esc(show(x.mine))}</td><td class="m">${esc(show(x.theirs))}</td>
+          <td style="text-align:right"><button class="linkish" data-conftake="${i}">take GitHub's</button></td></tr>`; }).join("")}
+      ${c.length>40?`<tr><td colspan="5" style="color:var(--ink3)">…and ${c.length-40} more</td></tr>`:""}
+      </tbody></table>
+      <div class="sheetbar"><button class="btn ghost" id="confTakeAll">Take GitHub's for all ${c.length}</button>
+        <button class="btn ghost" id="confKeep">Keep this machine's</button></div></div>`;
 }
 
 function viewAbout(){
@@ -2738,7 +3329,7 @@ function openEditor(p, seed){
   const isNew = !p;
   const s = seed || {};
   const d = p || {id:0,cat:s.cat||ui.cat||db.categories[0],lcsc:"",mpn:"",val:"",pkg:"",qty:0,min:null,
-                  box:s.box||ui.box||"",desc:"",src:"",ds:""};
+                  box:s.box||ui.box||"",desc:"",src:"",ds:"",img:""};
   $("#overlay").hidden = false;
   $("#overlay").innerHTML = `<form class="sheet" id="sheet" data-new="${isNew?1:0}" data-opencat="${esc(d.cat||"")}">
     <h2>${isNew?"Add part":"Edit part"}</h2>
@@ -2761,11 +3352,16 @@ function openEditor(p, seed){
       <div class="f" id="newCatWrap" hidden><label class="lab">Name the new category</label><input name="newcat" id="newCatInput" placeholder="Current Sense"></div>
       <div class="f"><label class="lab">Box</label><input name="box" value="${esc(d.box)}" placeholder="C7 or C1:25 + C6:20"><small>free numbers: ${nextFree().map(g=>g.next).join(", ")}</small></div>
       <div class="f"><label class="lab">Quantity</label><input name="qty" type="number" step="1" min="0" value="${Number(d.qty||0)}"></div>
-      <div class="f"><label class="lab">Alert below</label><input name="min" type="number" step="1" min="0" value="${d.min==null?"":d.min}" placeholder="2"><small>empty = 2</small></div>
+      <div class="f"><label class="lab">Alert below</label><input name="min" type="number" step="1" min="0" value="${d.min==null?"":d.min}" placeholder="${catMinOf(d.cat)}"><small>empty = category level (${catMinOf(d.cat)})</small></div>
+      <div class="f"><label class="lab">Unit price (USD)</label><input name="price" type="number" step="any" min="0" value="${d.price==null?"":d.price}" placeholder="from LCSC"><small>${d.price!=null&&Number(d.qty||0)?"stock worth $"+(d.price*Number(d.qty||0)).toFixed(2):"&nbsp;"}</small></div>
       <div class="f wide"><label class="lab">Description</label><input name="desc" value="${esc(d.desc)}"></div>
       <div class="f wide"><label class="lab">Datasheet</label>
         <input name="ds" value="${esc(d.ds||"")}" placeholder="filled in by the LCSC lookup — or paste one" spellcheck="false">
         <small>${d.ds?`<a class="linkish" target="_blank" rel="noreferrer" href="${esc(d.ds)}">open it</a>`:"&nbsp;"}</small></div>
+      <div class="f wide"><label class="lab">Picture</label>
+        <input name="img" value="${esc(d.img||"")}" placeholder="fetched with the LCSC lookup — or paste a link" spellcheck="false">
+        <small id="imgNote">&nbsp;</small>
+        <img class="imgprev" id="imgPrev" alt="" hidden></div>
     </div>
     <div class="sheetbar">
       <button class="btn" type="submit">${isNew?"Add part":"Save changes"}</button>
@@ -2787,7 +3383,8 @@ function openEditor(p, seed){
     }
     const rec = {cat:cat, lcsc:get("lcsc").toUpperCase(), mpn:get("mpn"), val:get("val"),
                  pkg:padPkg(get("pkg")), mfr:get("mfr"), box:get("box").toUpperCase(), desc:get("desc"),
-                 src:get("src"), ds:get("ds"),
+                 src:get("src"), ds:get("ds"), img:get("img"),
+                 price:get("price")===""||!isFinite(Number(get("price")))?null:Number(get("price")),
                  qty:Number(f.get("qty")||0), min:get("min")===""?null:Number(f.get("min"))};
     if(isNew){
       rec.id = 1+db.parts.reduce((m,p)=>Math.max(m,p.id),0);
@@ -2860,6 +3457,19 @@ function openEditor(p, seed){
     b.classList.add("gone"); b.disabled = true;
   });
 
+  const imgIn = $("#sheet").elements.img, imgPrev = $("#imgPrev");
+  const imgShow = ()=>{
+    const v = String(imgIn.value||"").trim();
+    if(!v){ imgPrev.hidden = true; return; }
+    imgPrev.onerror = ()=>{ imgPrev.hidden = true; };
+    if(imgIsUrl(v)){ imgPrev.referrerPolicy = "no-referrer"; imgPrev.src = v; imgPrev.hidden = false; }
+    else imgResolve(v).then(u=>{ if(u && imgIn.value.trim()===v){ imgPrev.src = u; imgPrev.hidden = false; } else imgPrev.hidden = true; });
+  };
+  imgIn.addEventListener("input", imgShow);
+  /* a value written by the lookup fires no event of its own */
+  imgIn.addEventListener("lcsc", imgShow);
+  imgShow();
+
   const first = $("#sheet input"); if(first) first.focus();
 }
 function closeEditor(){ $("#overlay").hidden = true; $("#overlay").innerHTML=""; }
@@ -2871,7 +3481,7 @@ function closeEditor(){ $("#overlay").hidden = true; $("#overlay").innerHTML="";
    its owner wants to keep.                                                  */
 const LCSC_FIELDS = [["mpn","part number"],["mfr","manufacturer"],["pkg","package"],
                      ["val","value"],["desc","description"],["cat","category"],["src","supplier"],
-                     ["ds","datasheet"]];
+                     ["ds","datasheet"],["price","unit price"]];
 
 async function lcscFill(){
   const form = $("#sheet"); if(!form) return;
@@ -2956,11 +3566,34 @@ function lcscApply(r, form, note){
   html += esc(bits.join(" · "));
   if(r.pdfUrl) html += ` · <a class="linkish" target="_blank" rel="noreferrer" href="${esc(r.pdfUrl)}">datasheet</a>`;
   html += ` · <a class="linkish" target="_blank" rel="noreferrer" href="${esc(lcscPage(r.productCode))}">on lcsc.com</a>`;
+  imgFill(r, form);
   if(offer.length){
     html += `<br>LCSC says otherwise — click to take it:<br>` +
       offer.map(([k,label,v])=>`<button type="button" class="take" data-k="${esc(k)}" data-v="${esc(v)}"><em>${esc(label)}</em> ${esc(v)}</button>`).join("");
   }
   note.innerHTML = html;
+}
+
+/* Only into an empty field: a picture already saved, or a link pasted by
+   hand, is the owner's choice and stays. Saved here first, then pushed -
+   a push that fails leaves it queued for the next one.                  */
+async function imgFill(r, form){
+  const el = form.elements.img, note = $("#imgNote");
+  if(!el || String(el.value||"").trim()) return;
+  const src = lcscImage(r);
+  if(!src){ if(note) note.textContent = "LCSC has no picture of this part"; return; }
+  if(note) note.textContent = "Fetching the picture…";
+  try{
+    const path = await imgSave(r.productCode, src);
+    if(!document.body.contains(el) || String(el.value||"").trim()) return;   /* closed or typed over meanwhile */
+    el.value = path; el.classList.add("fresh"); el.dispatchEvent(new Event("lcsc"));
+    let msg = "Saved as "+path;
+    if(ghReady()){
+      try{ await imgPush(); msg += " · pushed to "+gh.repo; }
+      catch(e){ msg += " · push failed ("+e.message+"), kept here for the next one"; }
+    } else msg += " · in this browser only until GitHub sync is set up";
+    if(note && document.body.contains(note)) note.textContent = msg;
+  }catch(e){ if(note && document.body.contains(note)) note.textContent = e.message; }
 }
 
 function download(name, data, type){
@@ -3131,7 +3764,7 @@ function xlsxBlob(sheetName, rows){
   ]);
 }
 function toCsv(){
-  const cols = ["cat","mfr","lcsc","mpn","val","pkg","qty","min","box","desc","src","ds"];
+  const cols = ["cat","mfr","lcsc","mpn","val","pkg","qty","min","box","desc","src","ds","img"];
   const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
   return [cols.join(",")].concat(db.parts.map(p=>cols.map(c=>q(p[c])).join(","))).join("\r\n");
 }
@@ -3215,11 +3848,26 @@ document.addEventListener("click", async ev=>{
     const at = db.boms.findIndex(b=>b.name.toLowerCase()===name.toLowerCase());
     const rec = {id: at>=0?db.boms[at].id:Date.now(), name, text,
                  boards: Math.max(1,Number($("#bomQty").value)||1),
+                 reserve: at>=0?Number(db.boms[at].reserve||0):0,
                  updated: new Date().toISOString()};
     if(at>=0) db.boms[at] = rec; else db.boms.push(rec);
     ui.bomName = name; ui.bomText = text;
     save(); render();
     toast(at>=0 ? "Updated "+name : "Saved "+name);
+    return;
+  }
+  const brs = t.closest("[data-bomres]"), brl = t.closest("[data-bomrel]");
+  if(brs || brl){
+    const b = (db.boms||[]).find(x=>x.id===Number((brs||brl).dataset[brs?"bomres":"bomrel"]));
+    if(!b) return;
+    const was = Number(b.reserve||0);
+    if(brs){
+      const n = Number(prompt("Hold the parts for how many boards of "+b.name+"?", String(b.boards||1)));
+      if(!(n>0)) return;
+      b.reserve = Math.floor(n);
+    } else b.reserve = 0;
+    rematchBom(); save(); render();
+    toast(brs ? "Holding parts for "+b.reserve+" × "+b.name : "Released "+b.name, "Undo", ()=>{ b.reserve = was; rematchBom(); save(); render(); });
     return;
   }
   const bl = t.closest("[data-bomload]");
@@ -3281,10 +3929,16 @@ document.addEventListener("click", async ev=>{
               d:p.qty-was, a:was, b:p.qty});
     });
     ui.picked = {};   /* those drawers have been dealt with */
+    /* the board just built no longer needs its parts held */
+    const ob = (db.boms||[]).find(b=>b.id===openBomId());
+    const resWas = ob ? Number(ob.reserve||0) : 0;
+    if(ob && resWas) ob.reserve = Math.max(0, resWas - Math.max(1, Number(ui.bomQty)||1));
     rematchBom();
     save(); render();
-    toast("Took "+pieces+" off the shelf, "+byPart.size+" part"+(byPart.size===1?"":"s"), "Undo", ()=>{
+    toast("Took "+pieces+" off the shelf, "+byPart.size+" part"+(byPart.size===1?"":"s")+
+          (ob && resWas ? " · "+ob.name+" now holds "+ob.reserve : ""), "Undo", ()=>{
       undo.forEach(u=>{ u.p.qty = u.was; u.p.box = u.wasBox; });
+      if(ob) ob.reserve = resWas;
       rematchBom(); save(); render();
     });
     return;
@@ -3490,6 +4144,7 @@ document.addEventListener("click", async ev=>{
     if(to!==from && db.categories.includes(to)) return toast("That category already exists");
     db.categories = db.categories.map(c=>c===from?to:c);
     db.parts.forEach(p=>{ if(p.cat===from) p.cat=to; });
+    if(db.catMin && db.catMin[from]!=null && to!==from){ db.catMin[to] = db.catMin[from]; delete db.catMin[from]; }
     if(ui.cat===from) ui.cat = to;
     ui.editCat=null; save(); render(); toast("Renamed to "+to);
     return;
@@ -3644,6 +4299,12 @@ document.addEventListener("click", async ev=>{
   }
 
   if(t.id==="lcscBulkScan"){ t.disabled = true; await lcscBulkRead(); return; }
+  if(t.id==="imgBulkGo"){ t.disabled = true; await imgBulkRun(); return; }
+  if(t.id==="imgBulkHalt"){ imgBulkStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
+  if(t.id==="imgPushGo"){ t.disabled = true;
+    try{ toast("Pushed "+(await imgPush())+" pictures to "+gh.repo); }
+    catch(e){ toast("Push failed: "+e.message); }
+    render(); return; }
   if(t.id==="lcscBulkHalt"){ lcscBulkStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
   if(t.id==="lcscBulkApply"){ lcscBulkApply(); return; }
   if(t.id==="lcscBulkCancel"){ ui.lcscBulk = null; $("#lcscBulkWork").innerHTML = ""; render(); return; }
@@ -3662,6 +4323,31 @@ document.addEventListener("click", async ev=>{
         (lcsc.relay ? "Check the address above — open it in a tab and see what it answers."
                     : "Set a relay of your own above; the public ones are not answering.");
     } finally { t.disabled = false; }
+    return;
+  }
+  const ct = t.closest("[data-conftake]");
+  if(ct || t.id==="confTakeAll"){
+    const list = ui.conflicts || [];
+    const pick = ct ? [list[Number(ct.dataset.conftake)]] : list.slice();
+    pick.forEach(x=>{ const p = x && findPart(x.id); if(p) p[x.k] = x.theirs; });
+    ui.conflicts = list.filter(x=>pick.indexOf(x)<0);
+    if(!ui.conflicts.length) ui.conflicts = null;
+    save(); render(); toast(pick.length+" field"+(pick.length>1?"s":"")+" set to GitHub's value");
+    return;
+  }
+  if(t.id==="confKeep"){ ui.conflicts = null; render(); return; }
+  if(t.id==="lcscFindScan"){ lcscFindBulk(); return; }
+  if(t.id==="lcscFindHalt"){ lcscFindStop = true; return; }
+  if(t.id==="lcscFindApply"){ lcscFindApply(); return; }
+  if(t.id==="lcscFindCancel"){ ui.findBulk = null; render(); return; }
+  if(t.id==="catMinSuggest"){
+    db.catMin = db.catMin || {};
+    const was = Object.assign({}, db.catMin);
+    const set = db.categories.filter(c=>db.catMin[c]==null);
+    set.forEach(c=>{ db.catMin[c] = suggestCatMin(c); });
+    if(!set.length) return toast("Every category already has a level");
+    save(); render();
+    toast("Set levels on "+set.length+" categories · "+db.parts.filter(isLow).length+" parts now low", "Undo", ()=>{ db.catMin = was; save(); render(); });
     return;
   }
   if(t.id==="ghPull" || t.id==="ghPullNow"){ await ghPull(); return; }
@@ -3808,6 +4494,14 @@ document.addEventListener("change", ev=>{
     pickSync();
     return;
   }
+  if(ev.target.classList && ev.target.classList.contains("catmin")){
+    const c = ev.target.dataset.catmin, v = String(ev.target.value).trim();
+    db.catMin = db.catMin || {};
+    if(v==="" || !isFinite(Number(v))) delete db.catMin[c]; else db.catMin[c] = Math.max(0, Math.floor(Number(v)));
+    save(); renderRail();
+    toast(v==="" ? c+": back to the default of 2" : c+": alert at "+db.catMin[c]);
+    return;
+  }
   if(ev.target.id==="ghAuto"){
     gh.auto = ev.target.checked; ghSave(); render();
     if(gh.auto && ghReady() && !ghPulled) ghPull();
@@ -3832,8 +4526,16 @@ document.addEventListener("change", ev=>{
     r.onload = ()=>{ try{
         const next = JSON.parse(r.result);
         if(!next || !Array.isArray(next.parts)) throw new Error("no parts array in that file");
-        db = normalize(next); save(); render(); toast("Loaded "+f.name);
-      }catch(e){ toast("Could not load: "+e.message); } };
+        /* this replaces the whole bin, and with sync on it goes to GitHub at
+           the next push - so it asks, and it can be taken back            */
+        if(db && db.parts.length && !confirm("Replace the "+db.parts.length+" parts here with the "+
+             next.parts.length+" in "+f.name+"?"+
+             (ghReady()?"\n\nThe next push sends this to "+gh.repo+". GitHub keeps the old version in its history.":""))) return;
+        const prev = JSON.stringify(db);
+        db = normalize(next); save(); render();
+        toast("Loaded "+f.name, "Undo", ()=>{ db = normalize(JSON.parse(prev)); save(); render(); });
+      }catch(e){ toast("Could not load: "+e.message); }
+      finally{ ev.target.value = ""; } };
     r.readAsText(f);
   }
 });
@@ -3864,19 +4566,27 @@ document.addEventListener("visibilitychange", ()=>{
 /* -------------------------------------------------------------------- boot */
 function normalize(d){
   d.parts = (d.parts||[]).map((p,i)=>({
-    id: Number(p.id||i+1), cat:p.cat||"", lcsc:(p.lcsc||"").toUpperCase(), mpn:p.mpn||"",
+    id: Number(p.id||i+1), cat:String(p.cat||"").trim(), lcsc:(p.lcsc||"").toUpperCase().trim(), mpn:String(p.mpn||"").trim(),
     val:p.val||"", pkg:padPkg(p.pkg), mfr:p.mfr||"", qty:Number(p.qty||0),
     min:(p.min===null||p.min===undefined||p.min==="")?null:Number(p.min),
-    box:(p.box||"").toUpperCase(), desc:p.desc||"", src:p.src||"", ds:p.ds||""
+    box:(p.box||"").toUpperCase(), desc:p.desc||"", src:p.src||"", ds:p.ds||"", img:p.img||"",
+    /* unit price in USD at the smallest LCSC break, null when unknown */
+    price:(p.price===null||p.price===undefined||p.price===""||!isFinite(Number(p.price)))?null:Number(p.price)
   }));
-  const cats = new Set(d.categories||[]);
+  /* "Rectifiers " and "Rectifiers" are one shelf - a trailing space split it in two */
+  const cats = new Set((d.categories||[]).map(c=>String(c).trim()).filter(Boolean));
   d.parts.forEach(p=>{ if(p.cat) cats.add(p.cat); });
   d.categories = [...cats];
   d.log = Array.isArray(d.log)? d.log : [];
   d.boms = Array.isArray(d.boms) ? d.boms.map(b=>({
     id:Number(b.id||Date.now()), name:String(b.name||"board"), text:String(b.text||""),
-    boards:Number(b.boards||1), updated:String(b.updated||"")
+    boards:Number(b.boards||1), updated:String(b.updated||""), reserve:Math.max(0, Number(b.reserve||0))
   })) : [];
+  /* alert level per category: keep only real numbers, keyed by the trimmed name */
+  const cm = {};
+  Object.entries(d.catMin && typeof d.catMin==="object" ? d.catMin : {}).forEach(([k,v])=>{
+    if(v!==null && v!=="" && isFinite(Number(v))) cm[String(k).trim()] = Number(v); });
+  d.catMin = cm;
   /* orders placed and not yet on the shelf. Kept in the data file, so the
      bench that ordered and the bench that unpacks are the same list.    */
   d.pending = Array.isArray(d.pending) ? d.pending.map(o=>({
@@ -3898,6 +4608,7 @@ function normalize(d){
     ghLoad();
     lcscLoad();
     prefsLoad();
+    imgBoot().then(()=>{ if(ui.view==="data") render(); });
     const saved = localLoad();
     db = normalize(saved && Array.isArray(saved.parts) && saved.parts.length ? saved : JSON.parse(JSON.stringify(SEED)));
     chip(saved?true:localSave());

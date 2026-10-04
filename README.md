@@ -105,6 +105,10 @@ and the wrong part to write into a bin. So every candidate is read back through 
 and its real part number compared with the one asked for. Exact matches and near misses are listed
 separately, nothing is written, and you pick.
 
+**Data → Parts with a part number but no LCSC code** does the same for every such part in one pass.
+Only exact part-number matches are offered, the supplier field is never touched (you may have bought
+the part elsewhere), and nothing is written until you have seen the list.
+
 ### Catching up parts you already entered
 
 ![The data view](docs/Data.png)
@@ -117,6 +121,31 @@ Nothing is written until you have seen the list: the run only *proposes* fills, 
 table, and **Fill in N parts** applies them — with a single **Undo** that puts back exactly the
 fields it changed. A part with no value is not treated as missing, since an MCU or a MOSFET has
 none and never will.
+
+The same pass keeps the datasheet link and the unit price at LCSC's smallest price break. The price
+gives **Data** a stock value and the saved boards a cost per board; it can also be typed into the
+part editor by hand.
+
+### Pictures
+
+Every part can show a photo, in a fixed square at the start of its row. **Fetch** in the part
+editor saves the picture along with everything else when the part has none yet, and **Data →
+Pictures → Fetch N pictures** does every part that carries an LCSC code but no picture, in one pass.
+
+LCSC's photos are 900×900 with the part small in the middle, so each one is trimmed to the part,
+drawn at the same fill into a 256×256 square on white, and saved as WebP (JPEG on Safari) — about
+10 KB each. The picture is kept in two places:
+
+- **this browser** (IndexedDB), so it shows at once and offline;
+- **the repository**, as `images/C1779.webp` beside the inventory file, pushed as one commit per
+  batch. Another machine reads it from there the first time it needs it, then keeps its own copy.
+
+The part itself only carries the path in its `img` field. Without GitHub sync the pictures stay in
+the browser that fetched them; **Data → Pictures** counts the ones not yet pushed and pushes them once
+sync is set up. A part with no LCSC code can take any image link pasted into its **Picture** field.
+
+The photo is fetched through the same relays as the lookup. A relay of your own needs
+`assets.lcsc.com` on its list of allowed hosts — it is in the code below.
 
 ### About the relay
 
@@ -154,7 +183,7 @@ export default {
     let host;
     try { host = new URL(target).hostname; }
     catch { return new Response("bad url", { status: 400, headers: cors }); }
-    if (!["wmsc.lcsc.com", "www.lcsc.com", "jlcpcb.com"].includes(host))
+    if (!["wmsc.lcsc.com", "www.lcsc.com", "assets.lcsc.com", "jlcpcb.com"].includes(host))
       return new Response("host not allowed", { status: 403, headers: cors });
 
     const init = {
@@ -270,6 +299,13 @@ which tells a fab nothing — so a three-digit footprint that is really a chip s
 out, whether it arrives in a pasted BOM, gets typed into the editor, or is already sitting in your
 data file.
 
+### Holding parts for a board
+
+A saved board can be **reserved** for a number of boards. Its parts stay on the shelf but stop
+counting as free: every other BOM, the low-stock check and the Order list see only what is left,
+and each part row shows how many pieces are held. Picking the board releases what it used, and
+**release** gives the rest back.
+
 ### Building it yourself — the picking walk
 
 Sending the board out is one direction. **Take it off the shelf** is the other, and it sits under
@@ -305,7 +341,8 @@ part-way through.
 ![The order view](docs/Order.png)
 
 **Order** gathers the shortfalls from the last BOM run and everything at or below its own alert
-level. **Copy for LCSC bulk order** puts it on the clipboard in the two-column form their bulk box
+level — the part's own level, or its category's when it has none (set under **Data → Categories**,
+with suggested starting levels one click away), or 2. **Copy for LCSC bulk order** puts it on the clipboard in the two-column form their bulk box
 accepts, so reordering is a paste. Lines with no LCSC code are counted separately, since those have
 to be ordered by part number.
 
@@ -412,6 +449,9 @@ That order is the one used everywhere else: the rail down the side, the dropdown
 editor, and the parts list when it is sorted by category. Put the shelves you reach for most at the
 top; a bench is not usually arranged alphabetically.
 
+Each category also carries an **alert at** level, used for every part in it that has no alert level
+of its own.
+
 ## Syncing through GitHub
 
 If you use more than one machine — a bench PC and a laptop, say — a private GitHub repository can
@@ -461,10 +501,19 @@ Open the same `inventory.html`, enter the same repository, path, branch and a to
 
 ### How conflicts are handled
 
-Parts follow the last machine that pushed. The movement log is *merged* rather than replaced, so
-entries made on another computer are never lost. If someone else pushed while your tab sat idle,
-your push is refused and you are told to pull first — **Force push** is there if you are certain
-yours is the copy to keep.
+Each browser remembers when it holds changes GitHub has not seen yet, even across a closed tab or a
+lost connection, and keeps the copy it last agreed with GitHub. A pull with changes outstanding is
+then *merged* three ways instead of replacing them:
+
+- a field changed on one machine only takes that machine's value;
+- a quantity changed on both adds both movements up (100 → 90 here, 100 → 95 there, lands on 85);
+- parts added or deleted on either side are kept added or deleted;
+- a field changed differently on both keeps this machine's value and is listed under **Data**, one
+  click to take GitHub's instead.
+
+The movement log is always merged, so entries from another computer are never lost. If another
+machine pushed first, the push merges and tries again on its own. **Force push** is still there
+if you are certain yours is the copy to keep.
 
 ## Your data
 
