@@ -7,7 +7,7 @@
 const CACHE = "parts-bin-v1";
 const SHELL = ["./", "./inventory.html", "./index.html", "./manifest.webmanifest",
                "./icons/icon.svg", "./icons/icon-192.png", "./icons/icon-512.png",
-               "./icons/icon-maskable-512.png", "./icons/apple-touch-icon.png"];
+               "./icons/icon-maskable-512.png", "./icons/apple-touch-icon.png", "./vendor/jsQR.js"];
 
 self.addEventListener("install", ev=>{
   /* one missing file must not stop the rest being kept */

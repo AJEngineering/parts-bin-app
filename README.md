@@ -258,10 +258,17 @@ The same links work typed or bookmarked: `#box=C7` opens a drawer, `#part=12` op
 - **One of your box labels.** Opens the parts list on that drawer.
 - **A bare LCSC code, a box number, or anything else.** Looked up, or searched for.
 
-The phone or laptop camera works where the browser can read codes (`BarcodeDetector`: Chrome on
-Android, Chrome and Edge on macOS), and only on an `https://` or `localhost` address. A handheld
-USB or Bluetooth scanner works in every browser: it types into the field and presses Enter, like a
-keyboard. Pasting a label's text works too.
+**Use the camera** works with a phone camera or a computer's webcam, in Chrome, Edge and Firefox
+on Windows, macOS, Linux and Android, on an `https://` or `localhost` address or with the file
+opened straight off the disk. Where there is more than one camera, a list picks which, and the
+choice is remembered. Browsers that read codes themselves (`BarcodeDetector`: Chrome on Android and
+macOS) use that; everywhere else the page loads [jsQR](https://github.com/cozmo/jsQR) the first
+time the camera is used, from `vendor/jsQR.js` beside the page when it is there, otherwise from
+jsDelivr, pinned to one version and checked against its hash. A webcam is fixed-focus, so hold a
+bag label a hand's width or more from the lens rather than right up against it.
+
+A handheld USB or Bluetooth scanner works in every browser: it types into the field and presses
+Enter, like a keyboard. Pasting a label's text works too.
 
 ## Checking a bill of materials
 

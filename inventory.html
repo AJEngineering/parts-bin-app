@@ -37,10 +37,10 @@ button{cursor:pointer;background:none;border:0}
      padding:10px 18px;background:var(--card);border-bottom:1px solid var(--rule)}
 .brand{display:flex;flex-direction:column;line-height:1.05}
 .brand-mark{font-family:var(--label);font-weight:700;font-size:20px;letter-spacing:.18em;
-            text-transform:uppercase}
+            text-transform:uppercase;white-space:nowrap}
 .brand-sub{font-family:var(--mono);font-size:10px;color:var(--ink3);letter-spacing:.02em}
 .searchwrap{display:flex;gap:6px;max-width:680px}
-.qbox{position:relative;flex:1;min-width:0}
+.qbox{position:relative;flex:1;min-width:130px}
 .scanbtn{display:flex;align-items:center;gap:6px;padding:0 13px;border:1.5px solid var(--rule);border-radius:2px;
          background:var(--paper);font-family:var(--label);text-transform:uppercase;letter-spacing:.1em;
          font-size:12px;font-weight:700;color:var(--ink2)}
@@ -300,6 +300,10 @@ td.num{font-variant-numeric:tabular-nums}
   @page{margin:10mm}
 }
 
+/* the nav is wide: below this the search box keeps its room and Scan keeps only its icon */
+@media (max-width:1240px) and (min-width:1101px){ .scanlbl{display:none} .scanbtn{padding:0 11px} }
+@media (max-width:1100px) and (min-width:861px){ .top{grid-template-columns:auto 1fr;row-gap:6px} .views{grid-column:1/-1;overflow:auto}
+  .rail{top:99px;max-height:calc(100vh - 99px)} }
 @media (max-width:860px){
   main{grid-template-columns:1fr}
   .rail{position:static;max-height:none;border-right:0;border-bottom:1px solid var(--rule)}
@@ -328,7 +332,7 @@ td.num{font-variant-numeric:tabular-nums}
     </div>
     <button class="scanbtn" id="scanBtn" type="button" title="Scan an LCSC bag, a box label or a part code">
       <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1 5V1h4M11 1h4v4M15 11v4h-4M5 15H1v-4M4 8h8"
-        fill="none" stroke="currentColor" stroke-width="1.6"/></svg>Scan</button>
+        fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span class="scanlbl">Scan</span></button>
   </div>
   <nav class="views" id="views">
     <button data-view="parts" class="on">Parts</button>
@@ -381,7 +385,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "2.3.0";
+const APP_VERSION = "2.4.0";
 const REPO_URL = "https://github.com/AJEngineering/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -4608,6 +4612,7 @@ document.addEventListener("change", ev=>{
   if(ev.target.id==="lcscPublic"){ lcsc.public = ev.target.checked; lcscSave(); }
   if(ev.target.id==="sort"){ ui.sort=ev.target.value; render(); }
   if(ev.target.id==="updCheck"){ prefs.updCheck = ev.target.checked; prefsSave(); updShow(); render(); return; }
+  if(ev.target.id==="scanCamSel"){ prefs.scanCam = ev.target.value; prefsSave(); scanCamStart(ev.target.value); return; }
   if(ev.target.id==="qrLabels"){ prefs.qrLabels = ev.target.checked; prefsSave(); render(); return; }
   if(ev.target.id==="qrBase"){
     const v = ev.target.value.trim();
@@ -4918,6 +4923,9 @@ function parseScan(raw){
   const up = t.toUpperCase();
   if(boxStats().some(b=>b.key===up)) return {kind:"box", v:up};
   if(/^C\d{2,}$/.test(up)) return {kind:"lcsc", lcsc:up, mpn:"", qty:0, order:""};
+  /* typed off a label with no QR code: "C251155 30" is the code and the bag's quantity */
+  const cq = /^(C\d{2,})\s*[\s x×*:]\s*(\d+)$/.exec(up);
+  if(cq) return {kind:"lcsc", lcsc:cq[1], mpn:"", qty:parseInt(cq[2],10), order:""};
   return {kind:"q", v:t};
 }
 function scanFind(s){
@@ -4925,17 +4933,21 @@ function scanFind(s){
          (s.mpn && db.parts.find(p=>mpnKey(p.mpn)===mpnKey(s.mpn))) || null;
 }
 
-let scanStream = null, scanTimer = null, scanLast = "", scanLastAt = 0;
+let scanStream = null, scanTimer = null, scanLast = "", scanLastAt = 0, scanDetect = null;
+/* a camera needs a secure page: https, localhost, or a file opened off the disk */
+const camOk = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && window.isSecureContext!==false;
 function openScan(){
-  const cam = "BarcodeDetector" in window && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const cam = camOk();
   $("#overlay").hidden = false;
   $("#overlay").innerHTML = `<div class="sheet scansheet" id="scanSheet">
     <h2>Scan</h2>
     <p style="margin-top:0;color:var(--ink2)">An LCSC bag, one of your box labels, a part code — or type anything to search.
-      ${cam ? "" : `<br><span style="color:var(--ink3);font-size:12px">This browser cannot read codes from the camera
-      (Chrome on Android or on a Mac can). A handheld scanner works here as it is: it types into the field below.</span>`}</p>
+      ${cam ? "" : `<br><span style="color:var(--ink3);font-size:12px">A camera needs this page on an https or localhost
+      address, or opened as a file. A handheld scanner works here as it is: it types into the field below.</span>`}</p>
     ${cam ? `<div class="scanvid" id="scanVidWrap" hidden><video id="scanVid" playsinline muted></video></div>
-      <div class="sheetbar"><button class="btn" type="button" id="scanCam">Use the camera</button></div>` : ""}
+      <div class="sheetbar"><button class="btn" type="button" id="scanCam">Use the camera</button>
+        <select id="scanCamSel" hidden title="which camera"></select>
+        <span id="scanHow" style="color:var(--ink3);font-size:12px"></span></div>` : ""}
     <input id="scanText" placeholder="scan or paste here, then Enter" autocomplete="off" spellcheck="false"
       style="width:100%;border:1px solid var(--rule);background:var(--paper);padding:9px;font-family:var(--mono);font-size:13px;border-radius:2px">
     <div id="scanOut" style="margin-top:12px"></div>
@@ -4943,33 +4955,119 @@ function openScan(){
   </div>`;
   setTimeout(()=>{ const i = $("#scanText"); if(i) i.focus(); }, 30);
 }
-async function scanCamStart(){
+
+/* What reads the codes. The browser's own BarcodeDetector where it has one
+   (Chrome on Android and macOS, which also reads Data Matrix and Code 128).
+   Elsewhere - Chrome and Edge on Windows and Linux, Firefox - jsQR, a small
+   QR reader loaded only when the camera is first used: from vendor/ beside
+   the page when it is there (the site, a clone of the repository), else
+   from jsDelivr, pinned to one version and checked against its hash.     */
+const JSQR_LOCAL = "vendor/jsQR.js";
+const JSQR_CDN = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+const JSQR_SRI = "sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx";
+let jsqrLoading = null;
+function loadJsQR(){
+  if(window.jsQR) return Promise.resolve(window.jsQR);
+  if(jsqrLoading) return jsqrLoading;
+  const add = (src, sri)=>new Promise((ok, no)=>{
+    const s = document.createElement("script");
+    s.src = src; s.async = true;
+    if(sri){ s.integrity = sri; s.crossOrigin = "anonymous"; }
+    s.onload = ()=> window.jsQR ? ok(window.jsQR) : no(new Error("jsQR did not load"));
+    s.onerror = ()=>{ s.remove(); no(new Error("could not load "+src)); };
+    document.head.appendChild(s);
+  });
+  jsqrLoading = add(JSQR_LOCAL).catch(()=>add(JSQR_CDN, JSQR_SRI)).catch(e=>{ jsqrLoading = null; throw e; });
+  return jsqrLoading;
+}
+async function scanDetector(){
+  if("BarcodeDetector" in window){
+    try{
+      const want = ["qr_code","data_matrix","code_128"];
+      const have = BarcodeDetector.getSupportedFormats ? await BarcodeDetector.getSupportedFormats() : want;
+      const formats = want.filter(f=>have.indexOf(f)>=0);
+      if(formats.indexOf("qr_code")>=0){
+        const det = new BarcodeDetector({formats});
+        const read = async v=>{ const c = await det.detect(v); return c.length ? c[0].rawValue : null; };
+        read.how = "built-in reader";
+        return read;
+      }
+    }catch(e){}
+  }
+  const jsQR = await loadJsQR();
+  const cv = document.createElement("canvas"), g = cv.getContext("2d", {willReadFrequently:true});
+  const read = async v=>{
+    const w0 = v.videoWidth, h0 = v.videoHeight;
+    if(!w0 || !h0) return null;
+    /* 800 px across is plenty for a label filling part of the frame, and keeps each pass short */
+    const k = Math.min(1, 800/Math.max(w0, h0)), w = Math.round(w0*k), h = Math.round(h0*k);
+    if(cv.width!==w || cv.height!==h){ cv.width = w; cv.height = h; }
+    g.drawImage(v, 0, 0, w, h);
+    const r = jsQR(g.getImageData(0, 0, w, h).data, w, h, {inversionAttempts:"dontInvert"});
+    return r ? r.data : null;
+  };
+  read.how = "jsQR";
+  return read;
+}
+async function scanCamStart(id){
+  scanStop();
   try{
-    const want = ["qr_code","data_matrix","code_128"];
-    const have = BarcodeDetector.getSupportedFormats ? await BarcodeDetector.getSupportedFormats() : want;
-    const det = new BarcodeDetector({formats: want.filter(f=>have.indexOf(f)>=0)});
-    scanStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}, audio:false});
+    if(!scanDetect) scanDetect = await scanDetector();
+    /* the camera picked last time if it is still there, else the one facing away */
+    const video = {width:{ideal:1280}, height:{ideal:720}};
+    if(id) video.deviceId = {exact:id};
+    else if(prefs.scanCam) video.deviceId = prefs.scanCam;
+    else video.facingMode = "environment";
+    scanStream = await navigator.mediaDevices.getUserMedia({video, audio:false});
     const v = $("#scanVid"); if(!v){ scanStop(); return; }
+    const set = scanStream.getVideoTracks()[0].getSettings ? scanStream.getVideoTracks()[0].getSettings() : {};
+    /* a webcam facing you is shown as a mirror, which is how a hand aims;
+       the frames the reader sees are not flipped                         */
+    v.style.transform = set.facingMode==="environment" ? "" : "scaleX(-1)";
     v.srcObject = scanStream; await v.play();
     $("#scanVidWrap").hidden = false; $("#scanCam").hidden = true;
+    const how = $("#scanHow"); if(how) how.textContent = "hold the code inside the frame · " + scanDetect.how;
+    /* labels only arrive once the camera has been allowed */
+    const sel = $("#scanCamSel");
+    if(sel){
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");
+      sel.innerHTML = devs.map((d,i)=>`<option value="${esc(d.deviceId)}"${d.deviceId===set.deviceId?" selected":""}>${esc(d.label||"Camera "+(i+1))}</option>`).join("");
+      sel.hidden = devs.length < 2;
+    }
+    let busy = false, since = Date.now();
     scanTimer = setInterval(async ()=>{
       const vid = $("#scanVid");
-      if(!vid || vid.readyState < 2) return;
+      if(busy || !vid || vid.readyState < 2) return;
+      busy = true;
       try{
-        const codes = await det.detect(vid);
-        if(!codes.length) return;
-        const val = codes[0].rawValue;
+        const val = await scanDetect(vid);
+        /* bags from before about 2020 carry a striped barcode and no QR code, and
+           nothing turns up however long they are held there - say so, once */
+        if(!val){
+          const how = $("#scanHow");
+          if(how && Date.now()-since > 8000 && !how.dataset.hint){
+            how.dataset.hint = "1";
+            how.innerHTML = `<span style="color:var(--kapton)">Nothing read yet. Older LCSC bags have only a striped barcode and
+              no QR code — type the C number from the label into the field below instead.</span>`;
+          }
+          return;
+        }
+        since = Date.now();
         /* the same label held in front of the lens is one scan, not ten */
         if(val===scanLast && Date.now()-scanLastAt < 3000){ scanLastAt = Date.now(); return; }
         scanLast = val; scanLastAt = Date.now();
         if(navigator.vibrate) navigator.vibrate(40);
         scanHandle(val);
       }catch(e){}
-    }, 250);
+      finally{ busy = false; }
+    }, 200);
   }catch(e){
     scanStop();
     toast(e && e.name==="NotAllowedError" ? "The camera was refused — allow it for this page and try again"
-          : "The camera could not start: "+(e.message||e)+(location.protocol==="https:"?"":" (it needs an https or localhost address)"));
+        : e && e.name==="NotFoundError" ? "No camera found on this computer"
+        : e && e.name==="NotReadableError" ? "The camera is in use by another program"
+        : /load/.test(e && e.message || "") ? "The QR reader could not load — it needs the network once, or vendor/jsQR.js beside the page"
+        : "The camera could not start: "+(e && e.message || e));
   }
 }
 function scanStop(){

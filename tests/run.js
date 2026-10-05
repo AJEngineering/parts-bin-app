@@ -10,6 +10,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const { chromium } = require("playwright");
 const jsQR = require("jsqr");
 
@@ -48,10 +49,25 @@ function decodeMatrix(rows){
   return r ? r.data : null;
 }
 
+/* raw YUV 4:2:0 video, one still frame: the QR code black on white, 6 px a module */
+function writeY4m(file, rows){
+  const W = 640, H = 480, n = rows.length, s = 6, ox = Math.floor((W - n*s)/2), oy = Math.floor((H - n*s)/2);
+  const y = Buffer.alloc(W*H, 235), uv = Buffer.alloc(W*H/2, 128);
+  for(let r=0;r<n;r++) for(let c=0;c<n;c++) if(rows[r][c]==="1")
+    for(let dy=0;dy<s;dy++) y.fill(16, (oy+r*s+dy)*W + ox+c*s, (oy+r*s+dy)*W + ox+c*s+s);
+  const frame = Buffer.concat([Buffer.from("FRAME\n"), y, uv]);
+  fs.writeFileSync(file, Buffer.concat([Buffer.from(`YUV4MPEG2 W${W} H${H} F10:1 Ip A1:1 C420jpeg\n`), frame, frame]));
+}
+
 (async ()=>{
   const srv = await serve();
   const base = "http://localhost:" + srv.address().port + "/";
-  const browser = await chromium.launch(process.env.CHROMIUM_PATH ? {executablePath: process.env.CHROMIUM_PATH} : {});
+  /* a fake webcam that films an LCSC bag label: written below as raw video */
+  const camFile = path.join(os.tmpdir(), "parts-bin-cam.y4m");
+  const opts = {args:["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+                      "--use-file-for-fake-video-capture=" + camFile]};
+  if(process.env.CHROMIUM_PATH) opts.executablePath = process.env.CHROMIUM_PATH;
+  const browser = await chromium.launch(opts);
   const ctx = await browser.newContext();
   /* nothing leaves the machine: GitHub and LCSC are not part of these tests */
   await ctx.route(u => !u.href.startsWith(base), r => r.abort());
@@ -151,7 +167,7 @@ function decodeMatrix(rows){
   const sc = await page.evaluate(() => [
     parseScan("{pbn:PICK2309120041,on:SO2309120012,pc:C25744,pm:0402WGF1002TCE,qty:100,mc:,cc:1,pdi:93118125,hp:0,wc:JS}"),
     parseScan("https://example.github.io/parts-bin-app/inventory.html#box=C7"),
-    parseScan("c3"), parseScan("C2040"), parseScan("ams1117")
+    parseScan("c3"), parseScan("C2040"), parseScan("ams1117"), parseScan("C251155 30")
   ]);
   check("an LCSC bag label gives code, part number, quantity and order",
         eq(sc[0], {kind:"lcsc", lcsc:"C25744", mpn:"0402WGF1002TCE", qty:100, order:"SO2309120012"}), sc[0]);
@@ -159,6 +175,7 @@ function decodeMatrix(rows){
   check("a bare box number opens the box", eq(sc[2], {kind:"box", v:"C3"}), sc[2]);
   check("a bare LCSC code is looked up", sc[3].kind === "lcsc" && sc[3].lcsc === "C2040", sc[3]);
   check("anything else is a search", eq(sc[4], {kind:"q", v:"ams1117"}), sc[4]);
+  check("a code typed with the bag's quantity keeps both", sc[5].lcsc === "C251155" && sc[5].qty === 30, sc[5]);
   const bag = await page.evaluate(() => {
     openScan(); scanHandle("{on:SO1,pc:C25744,pm:0402WGF1002TCE,qty:100}");
     const before = findPart(1).qty;
@@ -174,6 +191,30 @@ function decodeMatrix(rows){
   });
   check("#box=C5 opens the parts list on box C5 and clears the address",
         rt.view === "parts" && rt.box === "C5" && rt.hash === "", rt);
+
+  console.log("camera");
+  /* the label is drawn by the page's own encoder, so the reader is tested on
+     the codes this app prints and on the bags LCSC ships alike             */
+  const BAG = "{pbn:PICK2309120041,on:SO2309120012,pc:C25744,pm:0402WGF1002TCE,qty:100,mc:,cc:1,pdi:93118125,hp:0,wc:JS}";
+  const bagRows = await page.evaluate(t => qrEncode(t).map(r => r.map(b => b ? "1" : "0").join("")), BAG);
+  writeY4m(camFile, bagRows);
+  const cam = async (pg) => {
+    await pg.evaluate(() => { openScan(); document.getElementById("scanCam").click(); });
+    await pg.waitForSelector("#scanIn", {timeout:15000}).catch(() => {});
+    const r = await pg.evaluate(() => ({
+      found: !!document.getElementById("scanIn"),
+      how: (document.getElementById("scanHow") || {}).textContent || "",
+      cams: document.querySelectorAll("#scanCamSel option").length,
+      text: document.getElementById("scanOut").textContent.replace(/\s+/g, " ").trim()
+    }));
+    await pg.evaluate(() => closeEditor());
+    r.stopped = await pg.evaluate(() => scanStream === null);
+    return r;
+  };
+  const c1 = await cam(page);
+  check("a webcam with no BarcodeDetector reads an LCSC bag through jsQR", c1.found && /0402WGF1002TCE/.test(c1.text), c1);
+  check("the reader in use is named (" + c1.how.replace(/.*· /, "") + "), and the camera list is filled", /jsQR|built-in/.test(c1.how) && c1.cams >= 1, c1);
+  check("closing the sheet stops the camera", c1.stopped);
 
   console.log("QR codes");
   const texts = ["C7", base + "inventory.html#box=C12",
@@ -286,6 +327,10 @@ function decodeMatrix(rows){
   const fb = await fp.evaluate(async () => { await updCheck(true); const a = document.getElementById("updGet");
     return {shown:!document.getElementById("updBar").hidden, href:a && a.href}; });
   check("a copy opened from the disk offers the release's inventory.html", fb.shown && fb.href === "https://example.invalid/inventory.html", fb);
+  const ex2 = JSON.parse(fs.readFileSync(path.join(ROOT, "example-components.json"), "utf8"));
+  await fp.evaluate(d => { db = normalize(d); render(); }, ex2);
+  const c2 = await cam(fp);
+  check("the webcam works on a copy opened from the disk, reader loaded from vendor/", c2.found, c2);
   await uctx.close();
 
   await browser.close(); srv.close();
