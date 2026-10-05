@@ -68,9 +68,10 @@ you can replace either one without touching the other. There is a small
 | **Log** | Every movement, stamped with the machine that made it |
 | **Data** | The data file, GitHub sync, categories, and the LCSC settings |
 | **About** | What this is, the licence, and where the source lives |
+| **Scan** | An LCSC bag, a box label or a part code, from the camera, a handheld scanner or the clipboard |
 
 **Boxes → Printable labels** lays the drawers out as a printable sheet, one card per box with what
-is inside it.
+is inside it and a QR code that opens the page on that box.
 
 ## Filling a part in from LCSC
 
@@ -234,6 +235,34 @@ Click that dashed **free** tile. The part editor opens with the box number alrea
 can be filled without the form closing once. Combined with the LCSC lookup, adding a part is:
 paste code → **Fetch** → **Save and add another**.
 
+### Labels with a QR code
+
+Each printed card carries a QR code linking to `inventory.html#box=C7`. Scan it with **Scan** or
+with any phone camera and the page opens on that drawer. The code holds the page's own address, so
+print the labels from the copy you actually use (GitHub Pages, say). A page opened off the disk
+has no web address to give; type the address into the field on the labels page and the codes use
+that. The tick box there turns the codes off.
+
+The same links work typed or bookmarked: `#box=C7` opens a drawer, `#part=12` opens a part,
+`#q=10k 0603` runs a search.
+
+## Scanning
+
+**Scan**, next to the search box, takes whatever a scan produces:
+
+- **An LCSC bag.** The QR code on the bag label carries the LCSC code, the part number, the
+  quantity and the order number. A part already in the bin shows its drawer, its stock, what is on
+  order and which saved boards use it, with **Book in** (the bag's quantity, editable) and
+  **Take out** one press away, each with an Undo. A part not in the bin yet opens the part editor
+  with the code, part number and quantity filled in, and reads the rest off LCSC.
+- **One of your box labels.** Opens the parts list on that drawer.
+- **A bare LCSC code, a box number, or anything else.** Looked up, or searched for.
+
+The phone or laptop camera works where the browser can read codes (`BarcodeDetector`: Chrome on
+Android, Chrome and Edge on macOS), and only on an `https://` or `localhost` address. A handheld
+USB or Bluetooth scanner works in every browser: it types into the field and presses Enter, like a
+keyboard. Pasting a label's text works too.
+
 ## Checking a bill of materials
 
 ![The BOM view](docs/Bom.png)
@@ -305,6 +334,12 @@ A saved board can be **reserved** for a number of boards. Its parts stay on the 
 counting as free: every other BOM, the low-stock check and the Order list see only what is left,
 and each part row shows how many pieces are held. Picking the board releases what it used, and
 **release** gives the rest back.
+
+### Which boards use a part
+
+Every part a saved board calls for shows that board on its row, and the part editor lists each
+board with how many go on one, and how many are held. Each name opens that board in the BOM tab.
+Deleting such a part says which boards would lose a line first.
 
 ### Building it yourself — the picking walk
 
@@ -515,11 +550,42 @@ The movement log is always merged, so entries from another computer are never lo
 machine pushed first, the push merges and tries again on its own. **Force push** is still there
 if you are certain yours is the copy to keep.
 
+### Mixing versions
+
+The data file records the version of the page that last saved it. From 2.3.0 on, a page that finds
+its data saved by a *newer* version keeps every field it does not know, holds its automatic pushes,
+and asks before a manual one; the chip at the top says **push held**. Reloading on a hosted copy
+normally brings the newer page. A page older than 2.3.0 has no such check and drops fields it does
+not know when it pushes, so update every machine that syncs to the same repository.
+
+## Installing it as an app
+
+Opened from an `https://` address such as GitHub Pages, the page can be installed: **Install** in
+the address bar on Chrome and Edge, **Add to Home Screen** on a phone. It then opens in its own
+window and starts without a network, from the last copy it saw. With a network it always loads the
+newest page. Only the page's own files are kept for offline use; GitHub and LCSC are never cached,
+and the inventory itself stays where it always was, in the browser and in your data file or
+repository. Edits made offline wait as unpushed changes and go out when the connection returns.
+
+The single downloaded `inventory.html` keeps working exactly as before. It needs none of the extra
+files, which only matter when the page is served from a site.
+
+## Staying up to date
+
+Once a day the page asks GitHub for the latest release. When it is newer than the page, a bar along
+the top says so: a copy opened from the disk offers that release's `inventory.html` to download, and
+a copy served from a site offers **Reload to update** as soon as the site carries the newer page. A
+tab left open for days asks the site again when it comes back into view, and the newer page is kept
+for offline use on the way. **not now** hides the bar until the next version; **About → Check now**
+asks straight away. Offline or refused, the check says nothing.
+
 ## Your data
 
 The parts live in a `.json` file you control — on your disk, or in a private repository of your
-own. Nothing is uploaded anywhere else and there is no analytics of any kind. The only outbound
-request the page ever makes is the LCSC lookup, and only when you ask for it.
+own. Nothing is uploaded anywhere else and there is no analytics of any kind. The page reaches out
+only for the LCSC lookup when you ask for it, to your own repository when sync is on, and once a day
+to GitHub's public release list to see whether a newer version is out. That last request carries no
+token and nothing about your bin, and **About → Tell me when a newer version is out** turns it off.
 
 The access token is kept in that browser's local storage and is never written into the inventory
 file, so it cannot leak through a synced or exported copy. Anyone using that computer profile can
@@ -529,6 +595,16 @@ read it, though — scope it to the one repository, and revoke it if the machine
 
 Issues and pull requests are welcome. It is one file — open it in an editor and the whole program
 is in front of you, with the reasoning written in the comments.
+
+The tests load the page in headless Chromium and check the parts that decide what ends up in your
+data: value and BOM matching, the three-way sync merge, unknown fields and the version guard, scan
+parsing, that every QR label decodes, that the page opens offline, and the update check. They run on every push.
+
+```sh
+npm install
+npx playwright install chromium
+npm test
+```
 
 ## Licence
 

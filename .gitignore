@@ -6,3 +6,6 @@ inventory.backup-*.html
 *.bak
 .DS_Store
 Thumbs.db
+
+# Test dependencies (npm test)
+node_modules/

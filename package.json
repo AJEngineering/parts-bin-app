@@ -1,0 +1,14 @@
+{
+  "name": "parts-bin-app",
+  "version": "2.3.0",
+  "private": true,
+  "description": "Single-file electronic component inventory. The app itself has no dependencies; these are for the tests only.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node tests/run.js"
+  },
+  "devDependencies": {
+    "jsqr": "1.4.0",
+    "playwright": "1.56.1"
+  }
+}
