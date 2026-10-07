@@ -404,6 +404,63 @@ const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const num = n => (Math.round(n*100)/100).toLocaleString("en-US");
 
+/* ------------------------------------------------------------ versions ---
+   The data file carries the version of the page that last saved it. A page
+   older than that still reads it, but will not push it on its own: it
+   could not know what the newer one meant by a field it has never seen.  */
+let newerData = "";                 /* version of a newer page, when one wrote the data */
+let newerOk = "", newerWarned = false;   /* pushing over that version was allowed once by hand */
+function verCmp(a, b){
+  const pa = String(a||"0").split(".").map(Number), pb = String(b||"0").split(".").map(Number);
+  for(let i=0;i<3;i++){ const d = (pa[i]||0) - (pb[i]||0); if(d) return d>0?1:-1; }
+  return 0;
+}
+function noteVersion(d){
+  newerData = d && verCmp(d.app, APP_VERSION) > 0 ? String(d.app) : "";
+}
+
+/* Every field this page does not know is carried through untouched: a newer
+   page may have written it, and pushing must not strip it. `base` is set
+   when the copy is only GitHub's last agreed version, not the bin itself. */
+function normalize(d, base){
+  d.parts = (d.parts||[]).map((p,i)=>Object.assign({}, p, {
+    id: Number(p.id||i+1), cat:String(p.cat||"").trim(), lcsc:(p.lcsc||"").toUpperCase().trim(), mpn:String(p.mpn||"").trim(),
+    val:p.val||"", pkg:padPkg(p.pkg), mfr:p.mfr||"", qty:Number(p.qty||0),
+    min:(p.min===null||p.min===undefined||p.min==="")?null:Number(p.min),
+    box:(p.box||"").toUpperCase(), desc:p.desc||"", src:p.src||"", ds:p.ds||"", img:p.img||"",
+    /* unit price in USD at the smallest LCSC break, null when unknown */
+    price:(p.price===null||p.price===undefined||p.price===""||!isFinite(Number(p.price)))?null:Number(p.price)
+  }));
+  /* "Rectifiers " and "Rectifiers" are one shelf - a trailing space split it in two */
+  const cats = new Set((d.categories||[]).map(c=>String(c).trim()).filter(Boolean));
+  d.parts.forEach(p=>{ if(p.cat) cats.add(p.cat); });
+  d.categories = [...cats];
+  d.log = Array.isArray(d.log)? d.log : [];
+  d.boms = Array.isArray(d.boms) ? d.boms.map(b=>Object.assign({}, b, {
+    id:Number(b.id||Date.now()), name:String(b.name||"board"), text:String(b.text||""),
+    boards:Number(b.boards||1), updated:String(b.updated||""), reserve:Math.max(0, Number(b.reserve||0))
+  })) : [];
+  /* alert level per category: keep only real numbers, keyed by the trimmed name */
+  const cm = {};
+  Object.entries(d.catMin && typeof d.catMin==="object" ? d.catMin : {}).forEach(([k,v])=>{
+    if(v!==null && v!=="" && isFinite(Number(v))) cm[String(k).trim()] = Number(v); });
+  d.catMin = cm;
+  /* orders placed and not yet on the shelf. Kept in the data file, so the
+     bench that ordered and the bench that unpacks are the same list.    */
+  d.pending = Array.isArray(d.pending) ? d.pending.map(o=>Object.assign({}, o, {
+    id:Number(o.id||Date.now()), at:String(o.at||""),
+    lines:(Array.isArray(o.lines)?o.lines:[]).map(l=>Object.assign({}, l, {
+      pid:(l.pid===null||l.pid===undefined)?null:Number(l.pid),
+      lcsc:(l.lcsc||"").toUpperCase(), mpn:l.mpn||"", val:l.val||"", cat:l.cat||"",
+      qty:Number(l.qty||0), box:(l.box||"").toUpperCase(),
+      desc:l.desc||"", pkg:padPkg(l.pkg)
+    })).filter(l=>l.qty>0)
+  })).filter(o=>o.lines.length) : [];
+  d.version = 1;
+  if(!base) noteVersion(d);
+  return d;
+}
+
 /* ---------------------------------------------------------------- storage */
 /* A file handle survives a reload only if it is stored in IndexedDB. Every
    call is guarded: private windows and file:// origins may refuse it.       */
@@ -2402,6 +2459,359 @@ function lcscPrice(r){
 const SI_IN = {p:1e-12, n:1e-9, u:1e-6, "\u00b5":1e-6, m:1e-3, R:1, r:1, E:1,
                k:1e3, K:1e3, M:1e6, G:1e9, T:1e12};
 
+/* --------------------------------------------------- writing a spreadsheet -
+   Every fab takes CSV, so this looked unnecessary until you watch what Excel
+   does when the fab opens it: 0402 is read as a number and comes out 402, the
+   very thing that was just put right on the way in. A cell in a real sheet
+   can be marked as text and the zero stays.
+
+   An .xlsx is a zip of XML files. Nothing here needs compressing, and a zip
+   that stores rather than deflates is short enough to write by hand - which
+   keeps the promise that this page carries no dependencies.               */
+let CRC_TBL = null;
+function crc32(bytes){
+  if(!CRC_TBL){
+    CRC_TBL = new Uint32Array(256);
+    for(let i=0;i<256;i++){
+      let c = i;
+      for(let k=0;k<8;k++) c = (c & 1) ? (0xEDB88320 ^ (c>>>1)) : (c>>>1);
+      CRC_TBL[i] = c>>>0;
+    }
+  }
+  let c = 0xFFFFFFFF;
+  for(let i=0;i<bytes.length;i++) c = CRC_TBL[(c ^ bytes[i]) & 0xFF] ^ (c>>>8);
+  return (c ^ 0xFFFFFFFF)>>>0;
+}
+
+function zipStore(files){
+  const enc = new TextEncoder();
+  const u16 = n => [n&255, (n>>>8)&255];
+  const u32 = n => [n&255, (n>>>8)&255, (n>>>16)&255, (n>>>24)&255];
+  /* A DOS stamp of zero means day 0 of month 0, which is not a date. Some
+     readers shrug; a strict one refuses the whole archive, and the upload
+     comes back as a system error with nothing said about why.            */
+  const d = new Date();
+  const time = ((d.getHours()<<11) | (d.getMinutes()<<5) | (d.getSeconds()>>1)) & 0xFFFF;
+  const date = (((d.getFullYear()-1980)<<9) | ((d.getMonth()+1)<<5) | d.getDate()) & 0xFFFF;
+  const parts = [], dir = [];
+  let at = 0;
+  for(const f of files){
+    const name = enc.encode(f.name), data = enc.encode(f.text), crc = crc32(data);
+    const local = new Uint8Array([...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0),
+      ...u16(time), ...u16(date), ...u32(crc), ...u32(data.length), ...u32(data.length),
+      ...u16(name.length), ...u16(0)]);
+    parts.push(local, name, data);
+    dir.push({name, crc, size:data.length, at});
+    at += local.length + name.length + data.length;
+  }
+  const central = [];
+  let cdLen = 0;
+  for(const e of dir){
+    const h = new Uint8Array([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0),
+      ...u16(time), ...u16(date), ...u32(e.crc), ...u32(e.size), ...u32(e.size),
+      ...u16(e.name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(e.at)]);
+    central.push(h, e.name);
+    cdLen += h.length + e.name.length;
+  }
+  const end = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0),
+    ...u16(dir.length), ...u16(dir.length), ...u32(cdLen), ...u32(at), ...u16(0)]);
+  return new Blob(parts.concat(central, [end]),
+    {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+}
+
+const xmlEsc = s => String(s==null?"":s).replace(/[&<>"']/g,
+  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&apos;"}[c]));
+function colName(n){ let s=""; n++; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=(n-m-1)/26; } return s; }
+
+/* rows: an array of arrays. A finite number is written as a number; anything
+   else goes in as text, which is what keeps 0402 from becoming 402.
+
+   Written the long way on purpose. A sheet with nothing but sheetData opens
+   in Excel and passes a zip check, and is still refused by the parsers a
+   board house runs: they want the shared string table rather than strings
+   inlined, they expect a stylesheet to exist, and several read the declared
+   dimension before the rows. NextPCB answered such a file with an unexplained
+   system error. So the parts every reader looks for are all present.      */
+function xlsxBlob(sheetName, rows){
+  const P = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+  /* one entry per distinct string, cells point at it by index */
+  const strings = [], seen = new Map();
+  const strIdx = s => {
+    if(seen.has(s)) return seen.get(s);
+    const i = strings.length; strings.push(s); seen.set(s, i); return i;
+  };
+  let cellCount = 0, wide = 0;
+  const sheet = rows.map((cells,r)=>{
+    if(cells.length > wide) wide = cells.length;
+    const cs = cells.map((v,c)=>{
+      const ref = colName(c)+(r+1);
+      if(typeof v === "number" && isFinite(v)){ cellCount++; return `<c r="${ref}"><v>${v}</v></c>`; }
+      const s = String(v==null?"":v);
+      if(!s) return `<c r="${ref}"/>`;
+      cellCount++;
+      return `<c r="${ref}" t="s"><v>${strIdx(s)}</v></c>`;
+    }).join("");
+    return `<row r="${r+1}" spans="1:${cells.length||1}">${cs}</row>`;
+  }).join("");
+  const dim = "A1:" + colName(Math.max(0, wide-1)) + Math.max(1, rows.length);
+  const stamp = new Date().toISOString().replace(/\.\d+Z$/,"Z");
+
+  return zipStore([
+    {name:"[Content_Types].xml", text:P+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">`+
+      `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>`+
+      `<Default Extension="xml" ContentType="application/xml"/>`+
+      `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`+
+      `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`+
+      `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>`+
+      `<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>`+
+      `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`+
+      `<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`},
+
+    {name:"_rels/.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
+      `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/>`+
+      `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>`+
+      `<Relationship Id="rId3" Type="${REL}/extended-properties" Target="docProps/app.xml"/></Relationships>`},
+
+    {name:"docProps/core.xml", text:P+`<cp:coreProperties `+
+      `xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" `+
+      `xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" `+
+      `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">`+
+      `<dc:title>${xmlEsc(sheetName)}</dc:title><dc:creator>Parts Bin</dc:creator>`+
+      `<cp:lastModifiedBy>Parts Bin</cp:lastModifiedBy>`+
+      `<dcterms:created xsi:type="dcterms:W3CDTF">${stamp}</dcterms:created>`+
+      `<dcterms:modified xsi:type="dcterms:W3CDTF">${stamp}</dcterms:modified></cp:coreProperties>`},
+
+    {name:"docProps/app.xml", text:P+`<Properties `+
+      `xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" `+
+      `xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">`+
+      `<Application>Parts Bin</Application></Properties>`},
+
+    {name:"xl/workbook.xml", text:P+`<workbook xmlns="${NS}" xmlns:r="${REL}">`+
+      `<workbookPr/><bookViews><workbookView xWindow="0" yWindow="0" windowWidth="16384" windowHeight="8192"/></bookViews>`+
+      `<sheets><sheet name="${xmlEsc(sheetName).slice(0,31)}" sheetId="1" r:id="rId1"/></sheets></workbook>`},
+
+    {name:"xl/_rels/workbook.xml.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
+      `<Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/>`+
+      `<Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/>`+
+      `<Relationship Id="rId3" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/></Relationships>`},
+
+    /* the smallest stylesheet Excel calls valid: the first two fills and the
+       one cellXfs entry are required even when nothing is styled           */
+    {name:"xl/styles.xml", text:P+`<styleSheet xmlns="${NS}">`+
+      `<fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts>`+
+      `<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>`+
+      `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>`+
+      `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>`+
+      `<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>`+
+      `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>`+
+      `</styleSheet>`},
+
+    {name:"xl/sharedStrings.xml", text:P+`<sst xmlns="${NS}" count="${cellCount}" uniqueCount="${strings.length}">`+
+      strings.map(s=>`<si><t xml:space="preserve">${xmlEsc(s)}</t></si>`).join("")+`</sst>`},
+
+    {name:"xl/worksheets/sheet1.xml", text:P+`<worksheet xmlns="${NS}" xmlns:r="${REL}">`+
+      `<dimension ref="${dim}"/>`+
+      `<sheetViews><sheetView tabSelected="1" workbookViewId="0"/></sheetViews>`+
+      `<sheetFormatPr defaultRowHeight="15"/>`+
+      `<sheetData>${sheet}</sheetData></worksheet>`}
+  ]);
+}
+function toCsv(){
+  const cols = ["cat","mfr","lcsc","mpn","val","pkg","qty","min","box","desc","src","ds","img"];
+  const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
+  return [cols.join(",")].concat(db.parts.map(p=>cols.map(c=>q(p[c])).join(","))).join("\r\n");
+}
+
+/* ------------------------------------------------------------ used in ----
+   Which saved boards call for a part, and how many per board. Worked out
+   from the BOM text the same way the BOM tab matches it, cached per edit.  */
+let useCache = {at:null, map:new Map()};
+function usedInMap(){
+  const key = resKey() + "|" + prefs.bomMatch;      /* the match mode changes which part a line names */
+  if(useCache.at === key) return useCache.map;
+  const map = new Map();
+  (db.boms||[]).forEach(b=>{
+    parseBom(b.text).forEach(r=>{
+      const m = matchBom(r);
+      if(!m.p) return;
+      const list = map.get(m.p.id) || [];
+      const hit = list.find(x=>x.id===b.id);
+      if(hit) hit.per += (r.need||1); else list.push({id:b.id, name:b.name, per:(r.need||1), reserve:Number(b.reserve||0)});
+      map.set(m.p.id, list);
+    });
+  });
+  useCache = {at:key, map};
+  return map;
+}
+const usedIn = p => usedInMap().get(p.id) || [];
+function usedInText(p){
+  return usedIn(p).map(u=>u.name+" ×"+u.per+(u.reserve?" (holding "+u.reserve+")":"")).join(" · ");
+}
+
+/* ------------------------------------------------------------- QR code ---
+   A box label carries a QR code that opens the page on that box. No library:
+   byte mode, error correction level M, versions 1 to 10 (up to 213 bytes),
+   which is all a link needs. Follows ISO/IEC 18004 the way Project Nayuki's
+   reference generator lays it out.                                         */
+const QR_ECC = [0,10,16,26,18,24,16,18,22,22,26];    /* EC codewords per block, level M */
+const QR_BLK = [0,1,1,1,2,2,4,4,4,5,5];              /* blocks, level M */
+function qrRawModules(v){
+  let r = (16*v + 128)*v + 64;
+  if(v >= 2){ const n = Math.floor(v/7) + 2; r -= (25*n - 10)*n - 55; if(v >= 7) r -= 36; }
+  return r;
+}
+function qrMul(x, y){
+  let z = 0;
+  for(let i=7;i>=0;i--){ z = (z<<1) ^ ((z>>>7) * 0x11D); z ^= ((y>>>i)&1) * x; }
+  return z & 0xFF;
+}
+function qrDivisor(deg){
+  const r = new Array(deg).fill(0); r[deg-1] = 1;
+  let root = 1;
+  for(let i=0;i<deg;i++){
+    for(let j=0;j<deg;j++){ r[j] = qrMul(r[j], root); if(j+1<deg) r[j] ^= r[j+1]; }
+    root = qrMul(root, 2);
+  }
+  return r;
+}
+function qrRemainder(data, div){
+  const r = div.map(()=>0);
+  for(const b of data){
+    const f = b ^ r.shift(); r.push(0);
+    div.forEach((c,i)=>{ r[i] ^= qrMul(c, f); });
+  }
+  return r;
+}
+function qrEncode(text){
+  const data = Array.from(new TextEncoder().encode(text));
+  const dataCw = v => Math.floor(qrRawModules(v)/8) - QR_ECC[v]*QR_BLK[v];
+  let ver = 1;
+  for(; ver<=10; ver++) if(4 + (ver<10?8:16) + data.length*8 <= dataCw(ver)*8) break;
+  if(ver > 10) throw new Error("too long for a QR label");
+  /* data bits: byte mode, count, bytes, terminator, padding */
+  const bits = [];
+  const put = (v,n)=>{ for(let i=n-1;i>=0;i--) bits.push((v>>>i)&1); };
+  put(4,4); put(data.length, ver<10?8:16); data.forEach(b=>put(b,8));
+  const cap = dataCw(ver)*8;
+  put(0, Math.min(4, cap-bits.length)); put(0, (8 - bits.length%8) % 8);
+  for(let p=0xEC; bits.length<cap; p ^= 0xEC^0x11) put(p,8);
+  const cw = [];
+  for(let i=0;i<bits.length;i+=8){ let b=0; for(let j=0;j<8;j++) b = (b<<1)|bits[i+j]; cw.push(b); }
+  /* error correction, split into blocks and interleaved */
+  const nb = QR_BLK[ver], ecl = QR_ECC[ver], raw = Math.floor(qrRawModules(ver)/8);
+  const nShort = nb - raw%nb, shortLen = Math.floor(raw/nb), div = qrDivisor(ecl);
+  const blocks = [];
+  for(let i=0,k=0;i<nb;i++){
+    const dat = cw.slice(k, k + shortLen - ecl + (i<nShort?0:1)); k += dat.length;
+    const ec = qrRemainder(dat, div);
+    if(i < nShort) dat.push(0);
+    blocks.push(dat.concat(ec));
+  }
+  const all = [];
+  for(let i=0;i<blocks[0].length;i++) blocks.forEach((b,j)=>{ if(i!==shortLen-ecl || j>=nShort) all.push(b[i]); });
+
+  const size = ver*4 + 17;
+  const mod = Array.from({length:size}, ()=>new Array(size).fill(false));
+  const fn  = Array.from({length:size}, ()=>new Array(size).fill(false));
+  const setF = (x,y,on)=>{ mod[y][x] = on; fn[y][x] = true; };
+  for(let i=0;i<size;i++){ setF(6,i,i%2===0); setF(i,6,i%2===0); }
+  [[3,3],[size-4,3],[3,size-4]].forEach(([cx,cy])=>{
+    for(let dy=-4;dy<=4;dy++) for(let dx=-4;dx<=4;dx++){
+      const x=cx+dx, y=cy+dy, d=Math.max(Math.abs(dx),Math.abs(dy));
+      if(x>=0 && x<size && y>=0 && y<size) setF(x,y, d!==2 && d!==4);
+    }
+  });
+  if(ver > 1){
+    const n = Math.floor(ver/7) + 2, step = Math.ceil((ver*4 + 4)/(n*2 - 2))*2;
+    const pos = [6];
+    for(let p=size-7; pos.length<n; p-=step) pos.splice(1,0,p);
+    pos.forEach((y,i)=>pos.forEach((x,j)=>{
+      if((i===0&&j===0) || (i===0&&j===n-1) || (i===n-1&&j===0)) return;
+      for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++) setF(x+dx, y+dy, Math.max(Math.abs(dx),Math.abs(dy))!==1);
+    }));
+  }
+  const drawFormat = mask=>{
+    const d = (0<<3) | mask;                 /* level M = 00 */
+    let rem = d; for(let i=0;i<10;i++) rem = (rem<<1) ^ ((rem>>>9) * 0x537);
+    const b = ((d<<10) | rem) ^ 0x5412, bit = i=>((b>>>i)&1)===1;
+    for(let i=0;i<=5;i++) setF(8,i,bit(i));
+    setF(8,7,bit(6)); setF(8,8,bit(7)); setF(7,8,bit(8));
+    for(let i=9;i<15;i++) setF(14-i,8,bit(i));
+    for(let i=0;i<8;i++) setF(size-1-i,8,bit(i));
+    for(let i=8;i<15;i++) setF(8,size-15+i,bit(i));
+    setF(8,size-8,true);
+  };
+  drawFormat(0);
+  if(ver >= 7){
+    let rem = ver; for(let i=0;i<12;i++) rem = (rem<<1) ^ ((rem>>>11) * 0x1F25);
+    const b = (ver<<12) | rem;
+    for(let i=0;i<18;i++){
+      const on = ((b>>>i)&1)===1, a = size-11+i%3, c = Math.floor(i/3);
+      setF(a,c,on); setF(c,a,on);
+    }
+  }
+  /* the codewords, zigzagging up and down in column pairs */
+  let k = 0;
+  for(let right=size-1; right>=1; right-=2){
+    if(right===6) right = 5;
+    for(let v=0; v<size; v++) for(let j=0;j<2;j++){
+      const x = right-j, up = ((right+1)&2)===0, y = up ? size-1-v : v;
+      if(!fn[y][x] && k < all.length*8){ mod[y][x] = ((all[k>>>3]>>>(7-(k&7)))&1)===1; k++; }
+    }
+  }
+  const maskOn = (m,x,y)=>[
+    (x+y)%2===0, y%2===0, x%3===0, (x+y)%3===0,
+    (Math.floor(x/3)+Math.floor(y/2))%2===0, x*y%2 + x*y%3===0,
+    (x*y%2 + x*y%3)%2===0, ((x+y)%2 + x*y%3)%2===0][m];
+  const applyMask = m=>{ for(let y=0;y<size;y++) for(let x=0;x<size;x++) if(!fn[y][x] && maskOn(m,x,y)) mod[y][x] = !mod[y][x]; };
+  /* every mask decodes; the spec's penalty picks the one that scans best.
+     Runs, 2x2 blocks and balance are scored - enough to avoid the bad ones. */
+  const penalty = ()=>{
+    let p = 0, dark = 0;
+    for(let a=0;a<size;a++){
+      let rr=1, rc=1;
+      for(let b=1;b<size;b++){
+        if(mod[a][b]===mod[a][b-1]){ if(++rr===5) p+=3; else if(rr>5) p++; } else rr=1;
+        if(mod[b][a]===mod[b-1][a]){ if(++rc===5) p+=3; else if(rc>5) p++; } else rc=1;
+      }
+    }
+    for(let y=0;y<size;y++) for(let x=0;x<size;x++){
+      if(mod[y][x]) dark++;
+      if(x<size-1 && y<size-1){ const c=mod[y][x]; if(c===mod[y][x+1] && c===mod[y+1][x] && c===mod[y+1][x+1]) p+=3; }
+    }
+    return p + Math.floor(Math.abs(dark*20 - size*size*10)/(size*size)) * 10;
+  };
+  let best = 0, bestP = Infinity;
+  for(let m=0;m<8;m++){
+    applyMask(m); drawFormat(m);
+    const p = penalty();
+    if(p < bestP){ bestP = p; best = m; }
+    applyMask(m);
+  }
+  applyMask(best); drawFormat(best);
+  return mod;
+}
+/* drawn as one SVG path with the four-module quiet zone the spec asks for */
+function qrSvg(text, px){
+  let m;
+  try{ m = qrEncode(text); }catch(e){ return ""; }
+  const n = m.length, q = 4, w = n + q*2;
+  let d = "";
+  for(let y=0;y<n;y++) for(let x=0;x<n;x++) if(m[y][x]) d += `M${x+q},${y+q}h1v1h-1z`;
+  return `<svg class="qr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${w}" width="${px}" height="${px}"
+    shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="${w}" height="${w}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+}
+/* what a box label links to: this page at its own address, or the address
+   set under Labels - a page opened off the disk has no address to give    */
+function qrBase(){
+  if(prefs.qrBase) return prefs.qrBase.replace(/#.*$/,"");
+  return /^https?:$/.test(location.protocol) ? location.origin + location.pathname : "";
+}
+const boxLink = key => qrBase() + "#box=" + encodeURIComponent(key);
+
 /* ----------------------------------------------------------------- render */
 function render(){
   renderRail();
@@ -3680,170 +4090,304 @@ function download(name, data, type){
   setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
 }
 
-/* --------------------------------------------------- writing a spreadsheet -
-   Every fab takes CSV, so this looked unnecessary until you watch what Excel
-   does when the fab opens it: 0402 is read as a number and comes out 402, the
-   very thing that was just put right on the way in. A cell in a real sheet
-   can be marked as text and the zero stays.
+/* -------------------------------------------------------------- routing ---
+   #box=C7 opens the parts list on that drawer, #part=12 opens that part,
+   #q=10k 0603 runs a search. This is what a scanned label lands on.       */
+function routeHash(){
+  let h = "";
+  try{ h = decodeURIComponent(location.hash.slice(1)); }catch(e){ return false; }
+  if(!db) return false;
+  const m = /^(box|part|q)=(.+)$/i.exec(h);
+  if(!m && h!=="scan") return false;
+  /* taken off the address once used, so the same label scanned again lands
+     again, and a reload does not keep snapping back to it               */
+  try{ history.replaceState(null, "", location.pathname + location.search); }catch(e){}
+  if(m) goTo(m[1].toLowerCase(), m[2]); else openScan();
+  return true;
+}
+function goTo(kind, v){
+  closeEditor();
+  ui.view = "parts";
+  if(kind==="box"){ ui.box = String(v).toUpperCase(); ui.cat = ""; ui.q = ""; $("#q").value = ""; }
+  else if(kind==="q"){ ui.q = String(v); $("#q").value = ui.q; ui.box = ""; ui.cat = ""; }
+  render();
+  if(kind==="part"){ const p = findPart(v); if(p) openEditor(p); else toast("No part #"+v+" in this bin"); }
+}
+window.addEventListener("hashchange", routeHash);
 
-   An .xlsx is a zip of XML files. Nothing here needs compressing, and a zip
-   that stores rather than deflates is short enough to write by hand - which
-   keeps the promise that this page carries no dependencies.               */
-let CRC_TBL = null;
-function crc32(bytes){
-  if(!CRC_TBL){
-    CRC_TBL = new Uint32Array(256);
-    for(let i=0;i<256;i++){
-      let c = i;
-      for(let k=0;k<8;k++) c = (c & 1) ? (0xEDB88320 ^ (c>>>1)) : (c>>>1);
-      CRC_TBL[i] = c>>>0;
-    }
+/* ------------------------------------------------------------- scanning ---
+   One box takes whatever a scan produces: the phone camera where the browser
+   can read codes (Chrome on Android and on a Mac), a handheld scanner that
+   types into the field like a keyboard, or a label pasted by hand.
+     - an LCSC bag: its QR reads {pbn:...,on:...,pc:C25804,pm:0603WAF1002T5E,qty:100,...}
+     - one of this page's box labels: ...#box=C7
+     - a bare LCSC code, a box number, or anything else to search for      */
+function parseScan(raw){
+  const t = String(raw||"").trim();
+  if(!t) return null;
+  const link = /#(box|part|q)=([^&\s]+)/i.exec(t);
+  if(link){ let v = link[2]; try{ v = decodeURIComponent(v); }catch(e){} return {kind:link[1].toLowerCase(), v}; }
+  if(/\bpc\s*:\s*C\d+/i.test(t)){
+    const g = k=>{ const r = new RegExp("[{,]\\s*"+k+"\\s*:\\s*([^,}]*)","i").exec(t); return r ? r[1].trim().replace(/^"|"$/g,"") : ""; };
+    return {kind:"lcsc", lcsc:g("pc").toUpperCase(), mpn:g("pm"), qty:Math.max(0, parseInt(g("qty"),10)||0), order:g("on")};
   }
-  let c = 0xFFFFFFFF;
-  for(let i=0;i<bytes.length;i++) c = CRC_TBL[(c ^ bytes[i]) & 0xFF] ^ (c>>>8);
-  return (c ^ 0xFFFFFFFF)>>>0;
+  const up = t.toUpperCase();
+  if(boxStats().some(b=>b.key===up)) return {kind:"box", v:up};
+  if(/^C\d{2,}$/.test(up)) return {kind:"lcsc", lcsc:up, mpn:"", qty:0, order:""};
+  /* typed off a label with no QR code: "C251155 30" is the code and the bag's quantity */
+  const cq = /^(C\d{2,})\s*[\s x×*:]\s*(\d+)$/.exec(up);
+  if(cq) return {kind:"lcsc", lcsc:cq[1], mpn:"", qty:parseInt(cq[2],10), order:""};
+  return {kind:"q", v:t};
+}
+function scanFind(s){
+  return (s.lcsc && db.parts.find(p=>(p.lcsc||"").toUpperCase()===s.lcsc)) ||
+         (s.mpn && db.parts.find(p=>mpnKey(p.mpn)===mpnKey(s.mpn))) || null;
 }
 
-function zipStore(files){
-  const enc = new TextEncoder();
-  const u16 = n => [n&255, (n>>>8)&255];
-  const u32 = n => [n&255, (n>>>8)&255, (n>>>16)&255, (n>>>24)&255];
-  /* A DOS stamp of zero means day 0 of month 0, which is not a date. Some
-     readers shrug; a strict one refuses the whole archive, and the upload
-     comes back as a system error with nothing said about why.            */
-  const d = new Date();
-  const time = ((d.getHours()<<11) | (d.getMinutes()<<5) | (d.getSeconds()>>1)) & 0xFFFF;
-  const date = (((d.getFullYear()-1980)<<9) | ((d.getMonth()+1)<<5) | d.getDate()) & 0xFFFF;
-  const parts = [], dir = [];
-  let at = 0;
-  for(const f of files){
-    const name = enc.encode(f.name), data = enc.encode(f.text), crc = crc32(data);
-    const local = new Uint8Array([...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0),
-      ...u16(time), ...u16(date), ...u32(crc), ...u32(data.length), ...u32(data.length),
-      ...u16(name.length), ...u16(0)]);
-    parts.push(local, name, data);
-    dir.push({name, crc, size:data.length, at});
-    at += local.length + name.length + data.length;
-  }
-  const central = [];
-  let cdLen = 0;
-  for(const e of dir){
-    const h = new Uint8Array([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0),
-      ...u16(time), ...u16(date), ...u32(e.crc), ...u32(e.size), ...u32(e.size),
-      ...u16(e.name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(e.at)]);
-    central.push(h, e.name);
-    cdLen += h.length + e.name.length;
-  }
-  const end = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0),
-    ...u16(dir.length), ...u16(dir.length), ...u32(cdLen), ...u32(at), ...u16(0)]);
-  return new Blob(parts.concat(central, [end]),
-    {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+let scanStream = null, scanTimer = null, scanLast = "", scanLastAt = 0, scanDetect = null;
+/* a camera needs a secure page: https, localhost, or a file opened off the disk */
+const camOk = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && window.isSecureContext!==false;
+function openScan(){
+  const cam = camOk();
+  $("#overlay").hidden = false;
+  $("#overlay").innerHTML = `<div class="sheet scansheet" id="scanSheet">
+    <h2>Scan</h2>
+    <p style="margin-top:0;color:var(--ink2)">An LCSC bag, one of your box labels, a part code — or type anything to search.
+      ${cam ? "" : `<br><span style="color:var(--ink3);font-size:12px">A camera needs this page on an https or localhost
+      address, or opened as a file. A handheld scanner works here as it is: it types into the field below.</span>`}</p>
+    ${cam ? `<div class="scanvid" id="scanVidWrap" hidden><video id="scanVid" playsinline muted></video></div>
+      <div class="sheetbar"><button class="btn" type="button" id="scanCam">Use the camera</button>
+        <select id="scanCamSel" hidden title="which camera"></select>
+        <span id="scanHow" style="color:var(--ink3);font-size:12px"></span></div>` : ""}
+    <input id="scanText" placeholder="scan or paste here, then Enter" autocomplete="off" spellcheck="false"
+      style="width:100%;border:1px solid var(--rule);background:var(--paper);padding:9px;font-family:var(--mono);font-size:13px;border-radius:2px">
+    <div id="scanOut" style="margin-top:12px"></div>
+    <div class="sheetbar"><span class="grow"></span><button class="btn ghost" type="button" id="scanClose">Close</button></div>
+  </div>`;
+  setTimeout(()=>{ const i = $("#scanText"); if(i) i.focus(); }, 30);
 }
 
-const xmlEsc = s => String(s==null?"":s).replace(/[&<>"']/g,
-  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&apos;"}[c]));
-function colName(n){ let s=""; n++; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=(n-m-1)/26; } return s; }
-
-/* rows: an array of arrays. A finite number is written as a number; anything
-   else goes in as text, which is what keeps 0402 from becoming 402.
-
-   Written the long way on purpose. A sheet with nothing but sheetData opens
-   in Excel and passes a zip check, and is still refused by the parsers a
-   board house runs: they want the shared string table rather than strings
-   inlined, they expect a stylesheet to exist, and several read the declared
-   dimension before the rows. NextPCB answered such a file with an unexplained
-   system error. So the parts every reader looks for are all present.      */
-function xlsxBlob(sheetName, rows){
-  const P = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-  const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-
-  /* one entry per distinct string, cells point at it by index */
-  const strings = [], seen = new Map();
-  const strIdx = s => {
-    if(seen.has(s)) return seen.get(s);
-    const i = strings.length; strings.push(s); seen.set(s, i); return i;
+/* What reads the codes. The browser's own BarcodeDetector where it has one
+   (Chrome on Android and macOS, which also reads Data Matrix and Code 128).
+   Elsewhere - Chrome and Edge on Windows and Linux, Firefox - jsQR, a small
+   QR reader loaded only when the camera is first used: from vendor/ beside
+   the page when it is there (the site, a clone of the repository), else
+   from jsDelivr, pinned to one version and checked against its hash.     */
+const JSQR_LOCAL = "vendor/jsQR.js";
+const JSQR_CDN = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+const JSQR_SRI = "sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx";
+let jsqrLoading = null;
+function loadJsQR(){
+  if(window.jsQR) return Promise.resolve(window.jsQR);
+  if(jsqrLoading) return jsqrLoading;
+  const add = (src, sri)=>new Promise((ok, no)=>{
+    const s = document.createElement("script");
+    s.src = src; s.async = true;
+    if(sri){ s.integrity = sri; s.crossOrigin = "anonymous"; }
+    s.onload = ()=> window.jsQR ? ok(window.jsQR) : no(new Error("jsQR did not load"));
+    s.onerror = ()=>{ s.remove(); no(new Error("could not load "+src)); };
+    document.head.appendChild(s);
+  });
+  jsqrLoading = add(JSQR_LOCAL).catch(()=>add(JSQR_CDN, JSQR_SRI)).catch(e=>{ jsqrLoading = null; throw e; });
+  return jsqrLoading;
+}
+async function scanDetector(){
+  if("BarcodeDetector" in window){
+    try{
+      const want = ["qr_code","data_matrix","code_128"];
+      const have = BarcodeDetector.getSupportedFormats ? await BarcodeDetector.getSupportedFormats() : want;
+      const formats = want.filter(f=>have.indexOf(f)>=0);
+      if(formats.indexOf("qr_code")>=0){
+        const det = new BarcodeDetector({formats});
+        const read = async v=>{ const c = await det.detect(v); return c.length ? c[0].rawValue : null; };
+        read.how = "built-in reader";
+        return read;
+      }
+    }catch(e){}
+  }
+  const jsQR = await loadJsQR();
+  const cv = document.createElement("canvas"), g = cv.getContext("2d", {willReadFrequently:true});
+  const read = async v=>{
+    const w0 = v.videoWidth, h0 = v.videoHeight;
+    if(!w0 || !h0) return null;
+    /* 800 px across is plenty for a label filling part of the frame, and keeps each pass short */
+    const k = Math.min(1, 800/Math.max(w0, h0)), w = Math.round(w0*k), h = Math.round(h0*k);
+    if(cv.width!==w || cv.height!==h){ cv.width = w; cv.height = h; }
+    g.drawImage(v, 0, 0, w, h);
+    const r = jsQR(g.getImageData(0, 0, w, h).data, w, h, {inversionAttempts:"dontInvert"});
+    return r ? r.data : null;
   };
-  let cellCount = 0, wide = 0;
-  const sheet = rows.map((cells,r)=>{
-    if(cells.length > wide) wide = cells.length;
-    const cs = cells.map((v,c)=>{
-      const ref = colName(c)+(r+1);
-      if(typeof v === "number" && isFinite(v)){ cellCount++; return `<c r="${ref}"><v>${v}</v></c>`; }
-      const s = String(v==null?"":v);
-      if(!s) return `<c r="${ref}"/>`;
-      cellCount++;
-      return `<c r="${ref}" t="s"><v>${strIdx(s)}</v></c>`;
-    }).join("");
-    return `<row r="${r+1}" spans="1:${cells.length||1}">${cs}</row>`;
-  }).join("");
-  const dim = "A1:" + colName(Math.max(0, wide-1)) + Math.max(1, rows.length);
-  const stamp = new Date().toISOString().replace(/\.\d+Z$/,"Z");
-
-  return zipStore([
-    {name:"[Content_Types].xml", text:P+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">`+
-      `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>`+
-      `<Default Extension="xml" ContentType="application/xml"/>`+
-      `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`+
-      `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`+
-      `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>`+
-      `<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>`+
-      `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`+
-      `<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`},
-
-    {name:"_rels/.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
-      `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/>`+
-      `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>`+
-      `<Relationship Id="rId3" Type="${REL}/extended-properties" Target="docProps/app.xml"/></Relationships>`},
-
-    {name:"docProps/core.xml", text:P+`<cp:coreProperties `+
-      `xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" `+
-      `xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" `+
-      `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">`+
-      `<dc:title>${xmlEsc(sheetName)}</dc:title><dc:creator>Parts Bin</dc:creator>`+
-      `<cp:lastModifiedBy>Parts Bin</cp:lastModifiedBy>`+
-      `<dcterms:created xsi:type="dcterms:W3CDTF">${stamp}</dcterms:created>`+
-      `<dcterms:modified xsi:type="dcterms:W3CDTF">${stamp}</dcterms:modified></cp:coreProperties>`},
-
-    {name:"docProps/app.xml", text:P+`<Properties `+
-      `xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" `+
-      `xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">`+
-      `<Application>Parts Bin</Application></Properties>`},
-
-    {name:"xl/workbook.xml", text:P+`<workbook xmlns="${NS}" xmlns:r="${REL}">`+
-      `<workbookPr/><bookViews><workbookView xWindow="0" yWindow="0" windowWidth="16384" windowHeight="8192"/></bookViews>`+
-      `<sheets><sheet name="${xmlEsc(sheetName).slice(0,31)}" sheetId="1" r:id="rId1"/></sheets></workbook>`},
-
-    {name:"xl/_rels/workbook.xml.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
-      `<Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/>`+
-      `<Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/>`+
-      `<Relationship Id="rId3" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/></Relationships>`},
-
-    /* the smallest stylesheet Excel calls valid: the first two fills and the
-       one cellXfs entry are required even when nothing is styled           */
-    {name:"xl/styles.xml", text:P+`<styleSheet xmlns="${NS}">`+
-      `<fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts>`+
-      `<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>`+
-      `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>`+
-      `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>`+
-      `<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>`+
-      `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>`+
-      `</styleSheet>`},
-
-    {name:"xl/sharedStrings.xml", text:P+`<sst xmlns="${NS}" count="${cellCount}" uniqueCount="${strings.length}">`+
-      strings.map(s=>`<si><t xml:space="preserve">${xmlEsc(s)}</t></si>`).join("")+`</sst>`},
-
-    {name:"xl/worksheets/sheet1.xml", text:P+`<worksheet xmlns="${NS}" xmlns:r="${REL}">`+
-      `<dimension ref="${dim}"/>`+
-      `<sheetViews><sheetView tabSelected="1" workbookViewId="0"/></sheetViews>`+
-      `<sheetFormatPr defaultRowHeight="15"/>`+
-      `<sheetData>${sheet}</sheetData></worksheet>`}
-  ]);
+  read.how = "jsQR";
+  return read;
 }
-function toCsv(){
-  const cols = ["cat","mfr","lcsc","mpn","val","pkg","qty","min","box","desc","src","ds","img"];
-  const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
-  return [cols.join(",")].concat(db.parts.map(p=>cols.map(c=>q(p[c])).join(","))).join("\r\n");
+async function scanCamStart(id){
+  scanStop();
+  try{
+    if(!scanDetect) scanDetect = await scanDetector();
+    /* the camera picked last time if it is still there, else the one facing away */
+    const video = {width:{ideal:1280}, height:{ideal:720}};
+    if(id) video.deviceId = {exact:id};
+    else if(prefs.scanCam) video.deviceId = prefs.scanCam;
+    else video.facingMode = "environment";
+    scanStream = await navigator.mediaDevices.getUserMedia({video, audio:false});
+    const v = $("#scanVid"); if(!v){ scanStop(); return; }
+    const set = scanStream.getVideoTracks()[0].getSettings ? scanStream.getVideoTracks()[0].getSettings() : {};
+    /* a webcam facing you is shown as a mirror, which is how a hand aims;
+       the frames the reader sees are not flipped                         */
+    v.style.transform = set.facingMode==="environment" ? "" : "scaleX(-1)";
+    v.srcObject = scanStream; await v.play();
+    $("#scanVidWrap").hidden = false; $("#scanCam").hidden = true;
+    const how = $("#scanHow"); if(how) how.textContent = "hold the code inside the frame · " + scanDetect.how;
+    /* labels only arrive once the camera has been allowed */
+    const sel = $("#scanCamSel");
+    if(sel){
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");
+      sel.innerHTML = devs.map((d,i)=>`<option value="${esc(d.deviceId)}"${d.deviceId===set.deviceId?" selected":""}>${esc(d.label||"Camera "+(i+1))}</option>`).join("");
+      sel.hidden = devs.length < 2;
+    }
+    let busy = false, since = Date.now();
+    scanTimer = setInterval(async ()=>{
+      const vid = $("#scanVid");
+      if(busy || !vid || vid.readyState < 2) return;
+      busy = true;
+      try{
+        const val = await scanDetect(vid);
+        /* bags from before about 2020 carry a striped barcode and no QR code, and
+           nothing turns up however long they are held there - say so, once */
+        if(!val){
+          const how = $("#scanHow");
+          if(how && Date.now()-since > 8000 && !how.dataset.hint){
+            how.dataset.hint = "1";
+            how.innerHTML = `<span style="color:var(--kapton)">Nothing read yet. Older LCSC bags have only a striped barcode and
+              no QR code — type the C number from the label into the field below instead.</span>`;
+          }
+          return;
+        }
+        since = Date.now();
+        /* the same label held in front of the lens is one scan, not ten */
+        if(val===scanLast && Date.now()-scanLastAt < 3000){ scanLastAt = Date.now(); return; }
+        scanLast = val; scanLastAt = Date.now();
+        if(navigator.vibrate) navigator.vibrate(40);
+        scanHandle(val);
+      }catch(e){}
+      finally{ busy = false; }
+    }, 200);
+  }catch(e){
+    scanStop();
+    toast(e && e.name==="NotAllowedError" ? "The camera was refused — allow it for this page and try again"
+        : e && e.name==="NotFoundError" ? "No camera found on this computer"
+        : e && e.name==="NotReadableError" ? "The camera is in use by another program"
+        : /load/.test(e && e.message || "") ? "The QR reader could not load — it needs the network once, or vendor/jsQR.js beside the page"
+        : "The camera could not start: "+(e && e.message || e));
+  }
+}
+function scanStop(){
+  clearInterval(scanTimer); scanTimer = null;
+  if(scanStream){ scanStream.getTracks().forEach(t=>t.stop()); scanStream = null; }
+}
+function scanHandle(raw){
+  const s = parseScan(raw), out = $("#scanOut");
+  if(!s || !out) return;
+  if(s.kind!=="lcsc"){ scanStop(); goTo(s.kind, s.v); return; }
+  const p = scanFind(s);
+  const head = `<div class="lcscnote"><b class="pn">${esc(s.lcsc||s.mpn)}</b>${s.mpn&&s.lcsc?` · ${esc(s.mpn)}`:""}${
+    s.qty?` · bag of ${num(s.qty)}`:""}${s.order?` · order ${esc(s.order)}`:""}</div>`;
+  if(!p){
+    out.innerHTML = head + `<p>Not in the bin yet.</p>
+      <div class="sheetbar"><button class="btn" type="button" id="scanAdd">Add it${s.qty?" with "+num(s.qty):""}</button></div>`;
+    out.dataset.scan = JSON.stringify(s);
+    return;
+  }
+  const ord = onOrder(p.id, p.lcsc, p.mpn);
+  const where = partBoxes(p).map(t=>t.key).join(" + ") || "no box";
+  out.innerHTML = head + `<p><b>${esc(p.mpn||p.lcsc)}</b> ${esc(p.val||"")} · <b>${esc(where)}</b> ·
+      ${num(p.qty||0)} on the shelf${ord?` · <span style="color:var(--kapton)">${num(ord)} on order</span>`:""}${
+      usedIn(p).length?`<br><span style="color:var(--ink3);font-size:12px">used in ${esc(usedInText(p))}</span>`:""}</p>
+    <div class="sheetbar">
+      <input id="scanQty" type="number" min="1" step="1" value="${s.qty||1}"
+        style="width:100px;border:1px solid var(--rule);background:var(--paper);padding:7px 9px;font-family:var(--mono);font-size:13px;border-radius:2px">
+      <button class="btn" type="button" id="scanIn" data-pid="${p.id}">Book in</button>
+      <button class="btn ghost" type="button" id="scanOutBtn" data-pid="${p.id}">Take out</button>
+      <button class="btn ghost" type="button" id="scanOpen" data-pid="${p.id}">Open</button>
+    </div>`;
+}
+function scanMove(pid, sign){
+  const p = findPart(pid), n = Math.floor(Number(($("#scanQty")||{}).value)||0);
+  if(!p || n<=0) return;
+  const was = Number(p.qty||0);
+  p.qty = Math.max(0, was + sign*n);
+  logAdd({k:"qty", id:p.id, mpn:p.mpn, lcsc:p.lcsc, cat:p.cat, d:p.qty-was, a:was, b:p.qty});
+  save(); render();
+  toast((sign>0?"Booked in ":"Took out ")+n+" · "+(p.mpn||p.lcsc)+" now "+p.qty, "Undo", ()=>{ p.qty = was; save(); render(); });
+  const out = $("#scanOut"); if(out) out.innerHTML = `<div class="lcscnote">${sign>0?"Booked in":"Took out"} ${n} — scan the next one.</div>`;
+  const i = $("#scanText"); if(i){ i.value = ""; i.focus(); }
+}
+
+/* ------------------------------------------------------------- updates ---
+   Two questions, both answered quietly and never at the cost of an error:
+     - is there a newer release? GitHub's public releases list, once a day,
+       with no token and nothing about this bin in the request. This is what
+       tells a downloaded copy on the disk that it has fallen behind.
+     - served from a site, has that site a newer page than the one open? A
+       tab left open for a week asks again when it comes back into view. The
+       request passes the service worker, which keeps the newer copy for
+       offline use as it goes by, so the reload it offers is instant.     */
+const UPD_KEY = "parts-bin-update-v1";
+const UPD_DAY = 24*3600*1000;
+let upd = {at:0, latest:"", url:"", notes:"", dismissed:"", pageAt:0, page:""};
+function updLoad(){ try{ const t = localStorage.getItem(UPD_KEY); if(t) Object.assign(upd, JSON.parse(t)); }catch(e){} }
+function updSave(){ try{ localStorage.setItem(UPD_KEY, JSON.stringify(upd)); }catch(e){} }
+const updApi = () => REPO_URL.replace("https://github.com/", "https://api.github.com/repos/") + "/releases/latest";
+
+async function updCheck(force){
+  if(prefs.updCheck===false) return;
+  if(!force && Date.now() - (upd.at||0) < UPD_DAY){ updShow(); return; }
+  try{
+    const r = await fetch(updApi(), {headers:{Accept:"application/vnd.github+json"}, cache:"no-store", credentials:"omit"});
+    if(!r.ok) return;
+    const j = await r.json();
+    const v = String(j.tag_name||"").replace(/^v/i,"").trim();
+    if(!/^\d+(\.\d+){0,2}$/.test(v)) return;
+    const asset = (j.assets||[]).find(a=>a && a.name==="inventory.html");
+    upd.at = Date.now(); upd.latest = v;
+    upd.url = asset ? asset.browser_download_url : (j.html_url || REPO_URL+"/releases/latest");
+    upd.notes = j.html_url || REPO_URL+"/releases/latest";
+    updSave(); updShow();
+  }catch(e){}            /* offline, rate-limited, blocked: say nothing */
+}
+async function updCheckPage(force){
+  if(prefs.updCheck===false || !/^https?:$/.test(location.protocol)) return;
+  if(!force && Date.now() - (upd.pageAt||0) < 3600*1000){ updShow(); return; }
+  try{
+    const r = await fetch(location.pathname, {cache:"no-store", credentials:"same-origin"});
+    if(!r.ok) return;
+    const m = /const APP_VERSION = "([\d.]+)"/.exec(await r.text());
+    upd.pageAt = Date.now(); upd.page = m ? m[1] : "";
+    updSave(); updShow();
+    if(navigator.serviceWorker && navigator.serviceWorker.getRegistration){
+      const reg = await navigator.serviceWorker.getRegistration(); if(reg) reg.update().catch(()=>{});
+    }
+  }catch(e){}
+}
+/* what to offer: the page on this site when that is newer, else the release */
+function updOffer(){
+  if(prefs.updCheck===false) return null;
+  const hosted = /^https?:$/.test(location.protocol);
+  if(hosted && upd.page && verCmp(upd.page, APP_VERSION) > 0) return {v:upd.page, how:"reload"};
+  if(upd.latest && verCmp(upd.latest, APP_VERSION) > 0) return {v:upd.latest, how: hosted ? "notes" : "download"};
+  return null;
+}
+function updShow(){
+  const bar = $("#updBar"); if(!bar) return;
+  const o = updOffer();
+  if(!o || o.v===upd.dismissed){ bar.hidden = true; bar.innerHTML = ""; return; }
+  bar.hidden = false;
+  bar.innerHTML = `<b>Parts Bin ${esc(o.v)}</b> is out — this page is ${esc(APP_VERSION)}.
+    ${o.how==="reload" ? `<button class="btn" type="button" id="updReload">Reload to update</button>`
+      : o.how==="download" ? `<a class="btn" id="updGet" href="${esc(upd.url)}" target="_blank" rel="noreferrer">Download it</a>`
+      : `<span>This site has not caught up yet.</span>`}
+    <a class="linkish" href="${esc(upd.notes||REPO_URL+"/releases/latest")}" target="_blank" rel="noreferrer">what's new</a>
+    <span class="grow"></span><button class="linkish" type="button" id="updLater" title="hide until the next version">not now</button>`;
 }
 
 /* ------------------------------------------------------------------ wiring */
@@ -4677,508 +5221,6 @@ document.addEventListener("visibilitychange", ()=>{
   if(ghPushPending){ clearTimeout(ghTimer); ghPush(true); }
 });
 
-/* ------------------------------------------------------------ versions ---
-   The data file carries the version of the page that last saved it. A page
-   older than that still reads it, but will not push it on its own: it
-   could not know what the newer one meant by a field it has never seen.  */
-let newerData = "";                 /* version of a newer page, when one wrote the data */
-let newerOk = "", newerWarned = false;   /* pushing over that version was allowed once by hand */
-function verCmp(a, b){
-  const pa = String(a||"0").split(".").map(Number), pb = String(b||"0").split(".").map(Number);
-  for(let i=0;i<3;i++){ const d = (pa[i]||0) - (pb[i]||0); if(d) return d>0?1:-1; }
-  return 0;
-}
-function noteVersion(d){
-  newerData = d && verCmp(d.app, APP_VERSION) > 0 ? String(d.app) : "";
-}
-
-/* ------------------------------------------------------------ used in ----
-   Which saved boards call for a part, and how many per board. Worked out
-   from the BOM text the same way the BOM tab matches it, cached per edit.  */
-let useCache = {at:null, map:new Map()};
-function usedInMap(){
-  const key = resKey() + "|" + prefs.bomMatch;      /* the match mode changes which part a line names */
-  if(useCache.at === key) return useCache.map;
-  const map = new Map();
-  (db.boms||[]).forEach(b=>{
-    parseBom(b.text).forEach(r=>{
-      const m = matchBom(r);
-      if(!m.p) return;
-      const list = map.get(m.p.id) || [];
-      const hit = list.find(x=>x.id===b.id);
-      if(hit) hit.per += (r.need||1); else list.push({id:b.id, name:b.name, per:(r.need||1), reserve:Number(b.reserve||0)});
-      map.set(m.p.id, list);
-    });
-  });
-  useCache = {at:key, map};
-  return map;
-}
-const usedIn = p => usedInMap().get(p.id) || [];
-function usedInText(p){
-  return usedIn(p).map(u=>u.name+" ×"+u.per+(u.reserve?" (holding "+u.reserve+")":"")).join(" · ");
-}
-
-/* ------------------------------------------------------------- QR code ---
-   A box label carries a QR code that opens the page on that box. No library:
-   byte mode, error correction level M, versions 1 to 10 (up to 213 bytes),
-   which is all a link needs. Follows ISO/IEC 18004 the way Project Nayuki's
-   reference generator lays it out.                                         */
-const QR_ECC = [0,10,16,26,18,24,16,18,22,22,26];    /* EC codewords per block, level M */
-const QR_BLK = [0,1,1,1,2,2,4,4,4,5,5];              /* blocks, level M */
-function qrRawModules(v){
-  let r = (16*v + 128)*v + 64;
-  if(v >= 2){ const n = Math.floor(v/7) + 2; r -= (25*n - 10)*n - 55; if(v >= 7) r -= 36; }
-  return r;
-}
-function qrMul(x, y){
-  let z = 0;
-  for(let i=7;i>=0;i--){ z = (z<<1) ^ ((z>>>7) * 0x11D); z ^= ((y>>>i)&1) * x; }
-  return z & 0xFF;
-}
-function qrDivisor(deg){
-  const r = new Array(deg).fill(0); r[deg-1] = 1;
-  let root = 1;
-  for(let i=0;i<deg;i++){
-    for(let j=0;j<deg;j++){ r[j] = qrMul(r[j], root); if(j+1<deg) r[j] ^= r[j+1]; }
-    root = qrMul(root, 2);
-  }
-  return r;
-}
-function qrRemainder(data, div){
-  const r = div.map(()=>0);
-  for(const b of data){
-    const f = b ^ r.shift(); r.push(0);
-    div.forEach((c,i)=>{ r[i] ^= qrMul(c, f); });
-  }
-  return r;
-}
-function qrEncode(text){
-  const data = Array.from(new TextEncoder().encode(text));
-  const dataCw = v => Math.floor(qrRawModules(v)/8) - QR_ECC[v]*QR_BLK[v];
-  let ver = 1;
-  for(; ver<=10; ver++) if(4 + (ver<10?8:16) + data.length*8 <= dataCw(ver)*8) break;
-  if(ver > 10) throw new Error("too long for a QR label");
-  /* data bits: byte mode, count, bytes, terminator, padding */
-  const bits = [];
-  const put = (v,n)=>{ for(let i=n-1;i>=0;i--) bits.push((v>>>i)&1); };
-  put(4,4); put(data.length, ver<10?8:16); data.forEach(b=>put(b,8));
-  const cap = dataCw(ver)*8;
-  put(0, Math.min(4, cap-bits.length)); put(0, (8 - bits.length%8) % 8);
-  for(let p=0xEC; bits.length<cap; p ^= 0xEC^0x11) put(p,8);
-  const cw = [];
-  for(let i=0;i<bits.length;i+=8){ let b=0; for(let j=0;j<8;j++) b = (b<<1)|bits[i+j]; cw.push(b); }
-  /* error correction, split into blocks and interleaved */
-  const nb = QR_BLK[ver], ecl = QR_ECC[ver], raw = Math.floor(qrRawModules(ver)/8);
-  const nShort = nb - raw%nb, shortLen = Math.floor(raw/nb), div = qrDivisor(ecl);
-  const blocks = [];
-  for(let i=0,k=0;i<nb;i++){
-    const dat = cw.slice(k, k + shortLen - ecl + (i<nShort?0:1)); k += dat.length;
-    const ec = qrRemainder(dat, div);
-    if(i < nShort) dat.push(0);
-    blocks.push(dat.concat(ec));
-  }
-  const all = [];
-  for(let i=0;i<blocks[0].length;i++) blocks.forEach((b,j)=>{ if(i!==shortLen-ecl || j>=nShort) all.push(b[i]); });
-
-  const size = ver*4 + 17;
-  const mod = Array.from({length:size}, ()=>new Array(size).fill(false));
-  const fn  = Array.from({length:size}, ()=>new Array(size).fill(false));
-  const setF = (x,y,on)=>{ mod[y][x] = on; fn[y][x] = true; };
-  for(let i=0;i<size;i++){ setF(6,i,i%2===0); setF(i,6,i%2===0); }
-  [[3,3],[size-4,3],[3,size-4]].forEach(([cx,cy])=>{
-    for(let dy=-4;dy<=4;dy++) for(let dx=-4;dx<=4;dx++){
-      const x=cx+dx, y=cy+dy, d=Math.max(Math.abs(dx),Math.abs(dy));
-      if(x>=0 && x<size && y>=0 && y<size) setF(x,y, d!==2 && d!==4);
-    }
-  });
-  if(ver > 1){
-    const n = Math.floor(ver/7) + 2, step = Math.ceil((ver*4 + 4)/(n*2 - 2))*2;
-    const pos = [6];
-    for(let p=size-7; pos.length<n; p-=step) pos.splice(1,0,p);
-    pos.forEach((y,i)=>pos.forEach((x,j)=>{
-      if((i===0&&j===0) || (i===0&&j===n-1) || (i===n-1&&j===0)) return;
-      for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++) setF(x+dx, y+dy, Math.max(Math.abs(dx),Math.abs(dy))!==1);
-    }));
-  }
-  const drawFormat = mask=>{
-    const d = (0<<3) | mask;                 /* level M = 00 */
-    let rem = d; for(let i=0;i<10;i++) rem = (rem<<1) ^ ((rem>>>9) * 0x537);
-    const b = ((d<<10) | rem) ^ 0x5412, bit = i=>((b>>>i)&1)===1;
-    for(let i=0;i<=5;i++) setF(8,i,bit(i));
-    setF(8,7,bit(6)); setF(8,8,bit(7)); setF(7,8,bit(8));
-    for(let i=9;i<15;i++) setF(14-i,8,bit(i));
-    for(let i=0;i<8;i++) setF(size-1-i,8,bit(i));
-    for(let i=8;i<15;i++) setF(8,size-15+i,bit(i));
-    setF(8,size-8,true);
-  };
-  drawFormat(0);
-  if(ver >= 7){
-    let rem = ver; for(let i=0;i<12;i++) rem = (rem<<1) ^ ((rem>>>11) * 0x1F25);
-    const b = (ver<<12) | rem;
-    for(let i=0;i<18;i++){
-      const on = ((b>>>i)&1)===1, a = size-11+i%3, c = Math.floor(i/3);
-      setF(a,c,on); setF(c,a,on);
-    }
-  }
-  /* the codewords, zigzagging up and down in column pairs */
-  let k = 0;
-  for(let right=size-1; right>=1; right-=2){
-    if(right===6) right = 5;
-    for(let v=0; v<size; v++) for(let j=0;j<2;j++){
-      const x = right-j, up = ((right+1)&2)===0, y = up ? size-1-v : v;
-      if(!fn[y][x] && k < all.length*8){ mod[y][x] = ((all[k>>>3]>>>(7-(k&7)))&1)===1; k++; }
-    }
-  }
-  const maskOn = (m,x,y)=>[
-    (x+y)%2===0, y%2===0, x%3===0, (x+y)%3===0,
-    (Math.floor(x/3)+Math.floor(y/2))%2===0, x*y%2 + x*y%3===0,
-    (x*y%2 + x*y%3)%2===0, ((x+y)%2 + x*y%3)%2===0][m];
-  const applyMask = m=>{ for(let y=0;y<size;y++) for(let x=0;x<size;x++) if(!fn[y][x] && maskOn(m,x,y)) mod[y][x] = !mod[y][x]; };
-  /* every mask decodes; the spec's penalty picks the one that scans best.
-     Runs, 2x2 blocks and balance are scored - enough to avoid the bad ones. */
-  const penalty = ()=>{
-    let p = 0, dark = 0;
-    for(let a=0;a<size;a++){
-      let rr=1, rc=1;
-      for(let b=1;b<size;b++){
-        if(mod[a][b]===mod[a][b-1]){ if(++rr===5) p+=3; else if(rr>5) p++; } else rr=1;
-        if(mod[b][a]===mod[b-1][a]){ if(++rc===5) p+=3; else if(rc>5) p++; } else rc=1;
-      }
-    }
-    for(let y=0;y<size;y++) for(let x=0;x<size;x++){
-      if(mod[y][x]) dark++;
-      if(x<size-1 && y<size-1){ const c=mod[y][x]; if(c===mod[y][x+1] && c===mod[y+1][x] && c===mod[y+1][x+1]) p+=3; }
-    }
-    return p + Math.floor(Math.abs(dark*20 - size*size*10)/(size*size)) * 10;
-  };
-  let best = 0, bestP = Infinity;
-  for(let m=0;m<8;m++){
-    applyMask(m); drawFormat(m);
-    const p = penalty();
-    if(p < bestP){ bestP = p; best = m; }
-    applyMask(m);
-  }
-  applyMask(best); drawFormat(best);
-  return mod;
-}
-/* drawn as one SVG path with the four-module quiet zone the spec asks for */
-function qrSvg(text, px){
-  let m;
-  try{ m = qrEncode(text); }catch(e){ return ""; }
-  const n = m.length, q = 4, w = n + q*2;
-  let d = "";
-  for(let y=0;y<n;y++) for(let x=0;x<n;x++) if(m[y][x]) d += `M${x+q},${y+q}h1v1h-1z`;
-  return `<svg class="qr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${w}" width="${px}" height="${px}"
-    shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="${w}" height="${w}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
-}
-/* what a box label links to: this page at its own address, or the address
-   set under Labels - a page opened off the disk has no address to give    */
-function qrBase(){
-  if(prefs.qrBase) return prefs.qrBase.replace(/#.*$/,"");
-  return /^https?:$/.test(location.protocol) ? location.origin + location.pathname : "";
-}
-const boxLink = key => qrBase() + "#box=" + encodeURIComponent(key);
-
-/* -------------------------------------------------------------- routing ---
-   #box=C7 opens the parts list on that drawer, #part=12 opens that part,
-   #q=10k 0603 runs a search. This is what a scanned label lands on.       */
-function routeHash(){
-  let h = "";
-  try{ h = decodeURIComponent(location.hash.slice(1)); }catch(e){ return false; }
-  if(!db) return false;
-  const m = /^(box|part|q)=(.+)$/i.exec(h);
-  if(!m && h!=="scan") return false;
-  /* taken off the address once used, so the same label scanned again lands
-     again, and a reload does not keep snapping back to it               */
-  try{ history.replaceState(null, "", location.pathname + location.search); }catch(e){}
-  if(m) goTo(m[1].toLowerCase(), m[2]); else openScan();
-  return true;
-}
-function goTo(kind, v){
-  closeEditor();
-  ui.view = "parts";
-  if(kind==="box"){ ui.box = String(v).toUpperCase(); ui.cat = ""; ui.q = ""; $("#q").value = ""; }
-  else if(kind==="q"){ ui.q = String(v); $("#q").value = ui.q; ui.box = ""; ui.cat = ""; }
-  render();
-  if(kind==="part"){ const p = findPart(v); if(p) openEditor(p); else toast("No part #"+v+" in this bin"); }
-}
-window.addEventListener("hashchange", routeHash);
-
-/* ------------------------------------------------------------- scanning ---
-   One box takes whatever a scan produces: the phone camera where the browser
-   can read codes (Chrome on Android and on a Mac), a handheld scanner that
-   types into the field like a keyboard, or a label pasted by hand.
-     - an LCSC bag: its QR reads {pbn:...,on:...,pc:C25804,pm:0603WAF1002T5E,qty:100,...}
-     - one of this page's box labels: ...#box=C7
-     - a bare LCSC code, a box number, or anything else to search for      */
-function parseScan(raw){
-  const t = String(raw||"").trim();
-  if(!t) return null;
-  const link = /#(box|part|q)=([^&\s]+)/i.exec(t);
-  if(link){ let v = link[2]; try{ v = decodeURIComponent(v); }catch(e){} return {kind:link[1].toLowerCase(), v}; }
-  if(/\bpc\s*:\s*C\d+/i.test(t)){
-    const g = k=>{ const r = new RegExp("[{,]\\s*"+k+"\\s*:\\s*([^,}]*)","i").exec(t); return r ? r[1].trim().replace(/^"|"$/g,"") : ""; };
-    return {kind:"lcsc", lcsc:g("pc").toUpperCase(), mpn:g("pm"), qty:Math.max(0, parseInt(g("qty"),10)||0), order:g("on")};
-  }
-  const up = t.toUpperCase();
-  if(boxStats().some(b=>b.key===up)) return {kind:"box", v:up};
-  if(/^C\d{2,}$/.test(up)) return {kind:"lcsc", lcsc:up, mpn:"", qty:0, order:""};
-  /* typed off a label with no QR code: "C251155 30" is the code and the bag's quantity */
-  const cq = /^(C\d{2,})\s*[\s x×*:]\s*(\d+)$/.exec(up);
-  if(cq) return {kind:"lcsc", lcsc:cq[1], mpn:"", qty:parseInt(cq[2],10), order:""};
-  return {kind:"q", v:t};
-}
-function scanFind(s){
-  return (s.lcsc && db.parts.find(p=>(p.lcsc||"").toUpperCase()===s.lcsc)) ||
-         (s.mpn && db.parts.find(p=>mpnKey(p.mpn)===mpnKey(s.mpn))) || null;
-}
-
-let scanStream = null, scanTimer = null, scanLast = "", scanLastAt = 0, scanDetect = null;
-/* a camera needs a secure page: https, localhost, or a file opened off the disk */
-const camOk = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && window.isSecureContext!==false;
-function openScan(){
-  const cam = camOk();
-  $("#overlay").hidden = false;
-  $("#overlay").innerHTML = `<div class="sheet scansheet" id="scanSheet">
-    <h2>Scan</h2>
-    <p style="margin-top:0;color:var(--ink2)">An LCSC bag, one of your box labels, a part code — or type anything to search.
-      ${cam ? "" : `<br><span style="color:var(--ink3);font-size:12px">A camera needs this page on an https or localhost
-      address, or opened as a file. A handheld scanner works here as it is: it types into the field below.</span>`}</p>
-    ${cam ? `<div class="scanvid" id="scanVidWrap" hidden><video id="scanVid" playsinline muted></video></div>
-      <div class="sheetbar"><button class="btn" type="button" id="scanCam">Use the camera</button>
-        <select id="scanCamSel" hidden title="which camera"></select>
-        <span id="scanHow" style="color:var(--ink3);font-size:12px"></span></div>` : ""}
-    <input id="scanText" placeholder="scan or paste here, then Enter" autocomplete="off" spellcheck="false"
-      style="width:100%;border:1px solid var(--rule);background:var(--paper);padding:9px;font-family:var(--mono);font-size:13px;border-radius:2px">
-    <div id="scanOut" style="margin-top:12px"></div>
-    <div class="sheetbar"><span class="grow"></span><button class="btn ghost" type="button" id="scanClose">Close</button></div>
-  </div>`;
-  setTimeout(()=>{ const i = $("#scanText"); if(i) i.focus(); }, 30);
-}
-
-/* What reads the codes. The browser's own BarcodeDetector where it has one
-   (Chrome on Android and macOS, which also reads Data Matrix and Code 128).
-   Elsewhere - Chrome and Edge on Windows and Linux, Firefox - jsQR, a small
-   QR reader loaded only when the camera is first used: from vendor/ beside
-   the page when it is there (the site, a clone of the repository), else
-   from jsDelivr, pinned to one version and checked against its hash.     */
-const JSQR_LOCAL = "vendor/jsQR.js";
-const JSQR_CDN = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
-const JSQR_SRI = "sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx";
-let jsqrLoading = null;
-function loadJsQR(){
-  if(window.jsQR) return Promise.resolve(window.jsQR);
-  if(jsqrLoading) return jsqrLoading;
-  const add = (src, sri)=>new Promise((ok, no)=>{
-    const s = document.createElement("script");
-    s.src = src; s.async = true;
-    if(sri){ s.integrity = sri; s.crossOrigin = "anonymous"; }
-    s.onload = ()=> window.jsQR ? ok(window.jsQR) : no(new Error("jsQR did not load"));
-    s.onerror = ()=>{ s.remove(); no(new Error("could not load "+src)); };
-    document.head.appendChild(s);
-  });
-  jsqrLoading = add(JSQR_LOCAL).catch(()=>add(JSQR_CDN, JSQR_SRI)).catch(e=>{ jsqrLoading = null; throw e; });
-  return jsqrLoading;
-}
-async function scanDetector(){
-  if("BarcodeDetector" in window){
-    try{
-      const want = ["qr_code","data_matrix","code_128"];
-      const have = BarcodeDetector.getSupportedFormats ? await BarcodeDetector.getSupportedFormats() : want;
-      const formats = want.filter(f=>have.indexOf(f)>=0);
-      if(formats.indexOf("qr_code")>=0){
-        const det = new BarcodeDetector({formats});
-        const read = async v=>{ const c = await det.detect(v); return c.length ? c[0].rawValue : null; };
-        read.how = "built-in reader";
-        return read;
-      }
-    }catch(e){}
-  }
-  const jsQR = await loadJsQR();
-  const cv = document.createElement("canvas"), g = cv.getContext("2d", {willReadFrequently:true});
-  const read = async v=>{
-    const w0 = v.videoWidth, h0 = v.videoHeight;
-    if(!w0 || !h0) return null;
-    /* 800 px across is plenty for a label filling part of the frame, and keeps each pass short */
-    const k = Math.min(1, 800/Math.max(w0, h0)), w = Math.round(w0*k), h = Math.round(h0*k);
-    if(cv.width!==w || cv.height!==h){ cv.width = w; cv.height = h; }
-    g.drawImage(v, 0, 0, w, h);
-    const r = jsQR(g.getImageData(0, 0, w, h).data, w, h, {inversionAttempts:"dontInvert"});
-    return r ? r.data : null;
-  };
-  read.how = "jsQR";
-  return read;
-}
-async function scanCamStart(id){
-  scanStop();
-  try{
-    if(!scanDetect) scanDetect = await scanDetector();
-    /* the camera picked last time if it is still there, else the one facing away */
-    const video = {width:{ideal:1280}, height:{ideal:720}};
-    if(id) video.deviceId = {exact:id};
-    else if(prefs.scanCam) video.deviceId = prefs.scanCam;
-    else video.facingMode = "environment";
-    scanStream = await navigator.mediaDevices.getUserMedia({video, audio:false});
-    const v = $("#scanVid"); if(!v){ scanStop(); return; }
-    const set = scanStream.getVideoTracks()[0].getSettings ? scanStream.getVideoTracks()[0].getSettings() : {};
-    /* a webcam facing you is shown as a mirror, which is how a hand aims;
-       the frames the reader sees are not flipped                         */
-    v.style.transform = set.facingMode==="environment" ? "" : "scaleX(-1)";
-    v.srcObject = scanStream; await v.play();
-    $("#scanVidWrap").hidden = false; $("#scanCam").hidden = true;
-    const how = $("#scanHow"); if(how) how.textContent = "hold the code inside the frame · " + scanDetect.how;
-    /* labels only arrive once the camera has been allowed */
-    const sel = $("#scanCamSel");
-    if(sel){
-      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");
-      sel.innerHTML = devs.map((d,i)=>`<option value="${esc(d.deviceId)}"${d.deviceId===set.deviceId?" selected":""}>${esc(d.label||"Camera "+(i+1))}</option>`).join("");
-      sel.hidden = devs.length < 2;
-    }
-    let busy = false, since = Date.now();
-    scanTimer = setInterval(async ()=>{
-      const vid = $("#scanVid");
-      if(busy || !vid || vid.readyState < 2) return;
-      busy = true;
-      try{
-        const val = await scanDetect(vid);
-        /* bags from before about 2020 carry a striped barcode and no QR code, and
-           nothing turns up however long they are held there - say so, once */
-        if(!val){
-          const how = $("#scanHow");
-          if(how && Date.now()-since > 8000 && !how.dataset.hint){
-            how.dataset.hint = "1";
-            how.innerHTML = `<span style="color:var(--kapton)">Nothing read yet. Older LCSC bags have only a striped barcode and
-              no QR code — type the C number from the label into the field below instead.</span>`;
-          }
-          return;
-        }
-        since = Date.now();
-        /* the same label held in front of the lens is one scan, not ten */
-        if(val===scanLast && Date.now()-scanLastAt < 3000){ scanLastAt = Date.now(); return; }
-        scanLast = val; scanLastAt = Date.now();
-        if(navigator.vibrate) navigator.vibrate(40);
-        scanHandle(val);
-      }catch(e){}
-      finally{ busy = false; }
-    }, 200);
-  }catch(e){
-    scanStop();
-    toast(e && e.name==="NotAllowedError" ? "The camera was refused — allow it for this page and try again"
-        : e && e.name==="NotFoundError" ? "No camera found on this computer"
-        : e && e.name==="NotReadableError" ? "The camera is in use by another program"
-        : /load/.test(e && e.message || "") ? "The QR reader could not load — it needs the network once, or vendor/jsQR.js beside the page"
-        : "The camera could not start: "+(e && e.message || e));
-  }
-}
-function scanStop(){
-  clearInterval(scanTimer); scanTimer = null;
-  if(scanStream){ scanStream.getTracks().forEach(t=>t.stop()); scanStream = null; }
-}
-function scanHandle(raw){
-  const s = parseScan(raw), out = $("#scanOut");
-  if(!s || !out) return;
-  if(s.kind!=="lcsc"){ scanStop(); goTo(s.kind, s.v); return; }
-  const p = scanFind(s);
-  const head = `<div class="lcscnote"><b class="pn">${esc(s.lcsc||s.mpn)}</b>${s.mpn&&s.lcsc?` · ${esc(s.mpn)}`:""}${
-    s.qty?` · bag of ${num(s.qty)}`:""}${s.order?` · order ${esc(s.order)}`:""}</div>`;
-  if(!p){
-    out.innerHTML = head + `<p>Not in the bin yet.</p>
-      <div class="sheetbar"><button class="btn" type="button" id="scanAdd">Add it${s.qty?" with "+num(s.qty):""}</button></div>`;
-    out.dataset.scan = JSON.stringify(s);
-    return;
-  }
-  const ord = onOrder(p.id, p.lcsc, p.mpn);
-  const where = partBoxes(p).map(t=>t.key).join(" + ") || "no box";
-  out.innerHTML = head + `<p><b>${esc(p.mpn||p.lcsc)}</b> ${esc(p.val||"")} · <b>${esc(where)}</b> ·
-      ${num(p.qty||0)} on the shelf${ord?` · <span style="color:var(--kapton)">${num(ord)} on order</span>`:""}${
-      usedIn(p).length?`<br><span style="color:var(--ink3);font-size:12px">used in ${esc(usedInText(p))}</span>`:""}</p>
-    <div class="sheetbar">
-      <input id="scanQty" type="number" min="1" step="1" value="${s.qty||1}"
-        style="width:100px;border:1px solid var(--rule);background:var(--paper);padding:7px 9px;font-family:var(--mono);font-size:13px;border-radius:2px">
-      <button class="btn" type="button" id="scanIn" data-pid="${p.id}">Book in</button>
-      <button class="btn ghost" type="button" id="scanOutBtn" data-pid="${p.id}">Take out</button>
-      <button class="btn ghost" type="button" id="scanOpen" data-pid="${p.id}">Open</button>
-    </div>`;
-}
-function scanMove(pid, sign){
-  const p = findPart(pid), n = Math.floor(Number(($("#scanQty")||{}).value)||0);
-  if(!p || n<=0) return;
-  const was = Number(p.qty||0);
-  p.qty = Math.max(0, was + sign*n);
-  logAdd({k:"qty", id:p.id, mpn:p.mpn, lcsc:p.lcsc, cat:p.cat, d:p.qty-was, a:was, b:p.qty});
-  save(); render();
-  toast((sign>0?"Booked in ":"Took out ")+n+" · "+(p.mpn||p.lcsc)+" now "+p.qty, "Undo", ()=>{ p.qty = was; save(); render(); });
-  const out = $("#scanOut"); if(out) out.innerHTML = `<div class="lcscnote">${sign>0?"Booked in":"Took out"} ${n} — scan the next one.</div>`;
-  const i = $("#scanText"); if(i){ i.value = ""; i.focus(); }
-}
-
-/* ------------------------------------------------------------- updates ---
-   Two questions, both answered quietly and never at the cost of an error:
-     - is there a newer release? GitHub's public releases list, once a day,
-       with no token and nothing about this bin in the request. This is what
-       tells a downloaded copy on the disk that it has fallen behind.
-     - served from a site, has that site a newer page than the one open? A
-       tab left open for a week asks again when it comes back into view. The
-       request passes the service worker, which keeps the newer copy for
-       offline use as it goes by, so the reload it offers is instant.     */
-const UPD_KEY = "parts-bin-update-v1";
-const UPD_DAY = 24*3600*1000;
-let upd = {at:0, latest:"", url:"", notes:"", dismissed:"", pageAt:0, page:""};
-function updLoad(){ try{ const t = localStorage.getItem(UPD_KEY); if(t) Object.assign(upd, JSON.parse(t)); }catch(e){} }
-function updSave(){ try{ localStorage.setItem(UPD_KEY, JSON.stringify(upd)); }catch(e){} }
-const updApi = () => REPO_URL.replace("https://github.com/", "https://api.github.com/repos/") + "/releases/latest";
-
-async function updCheck(force){
-  if(prefs.updCheck===false) return;
-  if(!force && Date.now() - (upd.at||0) < UPD_DAY){ updShow(); return; }
-  try{
-    const r = await fetch(updApi(), {headers:{Accept:"application/vnd.github+json"}, cache:"no-store", credentials:"omit"});
-    if(!r.ok) return;
-    const j = await r.json();
-    const v = String(j.tag_name||"").replace(/^v/i,"").trim();
-    if(!/^\d+(\.\d+){0,2}$/.test(v)) return;
-    const asset = (j.assets||[]).find(a=>a && a.name==="inventory.html");
-    upd.at = Date.now(); upd.latest = v;
-    upd.url = asset ? asset.browser_download_url : (j.html_url || REPO_URL+"/releases/latest");
-    upd.notes = j.html_url || REPO_URL+"/releases/latest";
-    updSave(); updShow();
-  }catch(e){}            /* offline, rate-limited, blocked: say nothing */
-}
-async function updCheckPage(force){
-  if(prefs.updCheck===false || !/^https?:$/.test(location.protocol)) return;
-  if(!force && Date.now() - (upd.pageAt||0) < 3600*1000){ updShow(); return; }
-  try{
-    const r = await fetch(location.pathname, {cache:"no-store", credentials:"same-origin"});
-    if(!r.ok) return;
-    const m = /const APP_VERSION = "([\d.]+)"/.exec(await r.text());
-    upd.pageAt = Date.now(); upd.page = m ? m[1] : "";
-    updSave(); updShow();
-    if(navigator.serviceWorker && navigator.serviceWorker.getRegistration){
-      const reg = await navigator.serviceWorker.getRegistration(); if(reg) reg.update().catch(()=>{});
-    }
-  }catch(e){}
-}
-/* what to offer: the page on this site when that is newer, else the release */
-function updOffer(){
-  if(prefs.updCheck===false) return null;
-  const hosted = /^https?:$/.test(location.protocol);
-  if(hosted && upd.page && verCmp(upd.page, APP_VERSION) > 0) return {v:upd.page, how:"reload"};
-  if(upd.latest && verCmp(upd.latest, APP_VERSION) > 0) return {v:upd.latest, how: hosted ? "notes" : "download"};
-  return null;
-}
-function updShow(){
-  const bar = $("#updBar"); if(!bar) return;
-  const o = updOffer();
-  if(!o || o.v===upd.dismissed){ bar.hidden = true; bar.innerHTML = ""; return; }
-  bar.hidden = false;
-  bar.innerHTML = `<b>Parts Bin ${esc(o.v)}</b> is out — this page is ${esc(APP_VERSION)}.
-    ${o.how==="reload" ? `<button class="btn" type="button" id="updReload">Reload to update</button>`
-      : o.how==="download" ? `<a class="btn" id="updGet" href="${esc(upd.url)}" target="_blank" rel="noreferrer">Download it</a>`
-      : `<span>This site has not caught up yet.</span>`}
-    <a class="linkish" href="${esc(upd.notes||REPO_URL+"/releases/latest")}" target="_blank" rel="noreferrer">what's new</a>
-    <span class="grow"></span><button class="linkish" type="button" id="updLater" title="hide until the next version">not now</button>`;
-}
-
 /* ------------------------------------------------------------------ PWA ---
    Served over https (GitHub Pages) the page installs like an app and opens
    offline from its last copy. Off the disk there is nothing to install, and
@@ -5193,48 +5235,6 @@ function pwaBoot(){
 }
 
 /* -------------------------------------------------------------------- boot */
-/* Every field this page does not know is carried through untouched: a newer
-   page may have written it, and pushing must not strip it. `base` is set
-   when the copy is only GitHub's last agreed version, not the bin itself. */
-function normalize(d, base){
-  d.parts = (d.parts||[]).map((p,i)=>Object.assign({}, p, {
-    id: Number(p.id||i+1), cat:String(p.cat||"").trim(), lcsc:(p.lcsc||"").toUpperCase().trim(), mpn:String(p.mpn||"").trim(),
-    val:p.val||"", pkg:padPkg(p.pkg), mfr:p.mfr||"", qty:Number(p.qty||0),
-    min:(p.min===null||p.min===undefined||p.min==="")?null:Number(p.min),
-    box:(p.box||"").toUpperCase(), desc:p.desc||"", src:p.src||"", ds:p.ds||"", img:p.img||"",
-    /* unit price in USD at the smallest LCSC break, null when unknown */
-    price:(p.price===null||p.price===undefined||p.price===""||!isFinite(Number(p.price)))?null:Number(p.price)
-  }));
-  /* "Rectifiers " and "Rectifiers" are one shelf - a trailing space split it in two */
-  const cats = new Set((d.categories||[]).map(c=>String(c).trim()).filter(Boolean));
-  d.parts.forEach(p=>{ if(p.cat) cats.add(p.cat); });
-  d.categories = [...cats];
-  d.log = Array.isArray(d.log)? d.log : [];
-  d.boms = Array.isArray(d.boms) ? d.boms.map(b=>Object.assign({}, b, {
-    id:Number(b.id||Date.now()), name:String(b.name||"board"), text:String(b.text||""),
-    boards:Number(b.boards||1), updated:String(b.updated||""), reserve:Math.max(0, Number(b.reserve||0))
-  })) : [];
-  /* alert level per category: keep only real numbers, keyed by the trimmed name */
-  const cm = {};
-  Object.entries(d.catMin && typeof d.catMin==="object" ? d.catMin : {}).forEach(([k,v])=>{
-    if(v!==null && v!=="" && isFinite(Number(v))) cm[String(k).trim()] = Number(v); });
-  d.catMin = cm;
-  /* orders placed and not yet on the shelf. Kept in the data file, so the
-     bench that ordered and the bench that unpacks are the same list.    */
-  d.pending = Array.isArray(d.pending) ? d.pending.map(o=>Object.assign({}, o, {
-    id:Number(o.id||Date.now()), at:String(o.at||""),
-    lines:(Array.isArray(o.lines)?o.lines:[]).map(l=>Object.assign({}, l, {
-      pid:(l.pid===null||l.pid===undefined)?null:Number(l.pid),
-      lcsc:(l.lcsc||"").toUpperCase(), mpn:l.mpn||"", val:l.val||"", cat:l.cat||"",
-      qty:Number(l.qty||0), box:(l.box||"").toUpperCase(),
-      desc:l.desc||"", pkg:padPkg(l.pkg)
-    })).filter(l=>l.qty>0)
-  })).filter(o=>o.lines.length) : [];
-  d.version = 1;
-  if(!base) noteVersion(d);
-  return d;
-}
-
 (function boot(){
   try{
     devLoad();
