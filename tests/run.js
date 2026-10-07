@@ -120,6 +120,131 @@ function writeY4m(file, rows){
   check("category alert levels merge key by key", mg.catMin.Capacitors === 20 && mg.catMin.Resistors === 50 &&
         Object.keys(mg.catMin).length === 2, mg.catMin);
 
+  const mg2 = await page.evaluate(() => {
+    const clone = o => JSON.parse(JSON.stringify(o));
+    const p = id => x => x.parts.find(q => q.id === id);
+    const out = {};
+    let B = normalize(clone(db)), M = normalize(clone(db)), T = normalize(clone(db));
+    M.parts = M.parts.filter(x => x.id !== 5); p(5)(T).qty = 7;                    /* deleted here, edited there */
+    T.parts = T.parts.filter(x => x.id !== 6); p(6)(M).desc = "kept here";         /* deleted there, edited here */
+    M.parts = M.parts.filter(x => x.id !== 7);                                       /* deleted here, untouched there */
+    const nid = 1 + B.parts.reduce((n, x) => Math.max(n, x.id), 0);
+    M.parts.push({id:nid, mpn:"ONLY-HERE", qty:3});                                  /* added here only */
+    p(1)(B).qty = 10; p(1)(M).qty = 0; p(1)(T).qty = 5;                             /* took more than there was */
+    M.categories = M.categories.concat("Mine-Cat").filter(c => c !== "Inductors");
+    T.categories = T.categories.concat("Their-Cat");
+    M.boms[0].boards = 4; T.boms.push({id:99, name:"theirs", text:"", boards:1});
+    M.log = [{t:"2026-01-02T00:00:00Z", dev:"a", id:1, k:"qty", d:-1}];
+    T.log = [{t:"2026-01-01T00:00:00Z", dev:"b", id:2, k:"qty", d:1}, {t:"2026-01-02T00:00:00Z", dev:"a", id:1, k:"qty", d:-1}];
+    let r = merge3(B, M, T).db;
+    out.p5 = p(5)(r) && p(5)(r).qty; out.p6 = p(6)(r) && p(6)(r).desc; out.p7 = !!p(7)(r);
+    out.here = !!r.parts.find(x => x.mpn === "ONLY-HERE"); out.q1 = p(1)(r).qty;
+    out.cats = ["Mine-Cat", "Their-Cat", "Inductors"].map(c => r.categories.includes(c));
+    out.bom = r.boms.find(b => b.id === M.boms[0].id).boards; out.bom99 = !!r.boms.find(b => b.id === 99);
+    out.log = r.log.map(l => l.dev);
+    /* the first pull: no base, so every difference is a clash and this machine wins */
+    M = normalize(clone(db)); T = normalize(clone(db));
+    p(2)(M).box = "A1"; p(2)(T).box = "B1"; p(3)(T).desc = "theirs";
+    const nb = merge3(null, M, T);
+    out.nb = [p(2)(nb.db).box, p(3)(nb.db).desc === p(3)(M).desc, nb.conflicts.map(c => c.id + ":" + c.k).sort()];
+    /* nothing changed anywhere: the parts come back as they were */
+    B = normalize(clone(db));
+    out.same = JSON.stringify(merge3(B, clone(B), clone(B)).db.parts) === JSON.stringify(B.parts);
+    return out;
+  });
+  check("an edit there beats a delete here", mg2.p5 === 7, mg2.p5);
+  check("an edit here beats a delete there", mg2.p6 === "kept here", mg2.p6);
+  check("a part deleted here and untouched there stays deleted", mg2.p7 === false);
+  check("a part added here only is kept", mg2.here === true);
+  check("a quantity never merges below zero", mg2.q1 === 0, mg2.q1);
+  check("categories: added on either side kept, removed here removed", eq(mg2.cats, [true, true, false]), mg2.cats);
+  check("a board edited here keeps this machine's edit, one added there arrives", mg2.bom === 4 && mg2.bom99, mg2);
+  check("the log is the union of both, oldest first, each movement once", eq(mg2.log, ["b", "a"]), mg2.log);
+  check("without a base every difference is a clash and this machine's value is kept",
+        eq(mg2.nb, ["A1", true, ["2:box", "3:desc"]]), mg2.nb);
+  check("merging three equal copies changes no part", mg2.same === true);
+
+  console.log("changes to the data");
+  const ac = await page.evaluate(() => {
+    const clone = o => JSON.parse(JSON.stringify(o));
+    const state = () => JSON.stringify(Object.assign({}, db, {log:null, updated:null}));
+    const out = {};
+    /* each change does what it says, and its undo puts db back exactly */
+    const tryOne = (name, run, effect) => {
+      const before = state();
+      const r = run();
+      const did = effect(r);
+      if(r && r.undo) r.undo();
+      out[name] = [did, state() === before];
+    };
+    out.snap = JSON.stringify(db);
+    /* saving under a name already there, in another case, replaces that board */
+    const s1 = bomSave("Test board", "R1,10k,0402", 3), s2 = bomSave("TEST BOARD", "R1,10k,0402", "x");
+    out.bomSave = [s1.updated, s2.updated, db.boms.filter(b => /test board/i.test(b.name)).map(b => b.boards)];
+    db.boms = db.boms.filter(b => !/test board/i.test(b.name));
+    const b0 = db.boms[0];
+    tryOne("bomReserve", () => bomReserve(b0, 2), () => b0.reserve === 2);
+    tryOne("bomDelete", () => bomDelete(b0), () => !db.boms.includes(b0));
+    tryOne("orderReceive", () => orderReceive([{part:findPart(1), qty:10, lcsc:"", mpn:""},
+                                               {part:null, qty:5, lcsc:"c99", mpn:"NEW-ONE"}]),
+           r => findPart(1).qty === 490 && r.added === 1 && !!db.parts.find(p => p.lcsc === "C99" && p.id === 30));
+    tryOne("partsMerge", () => partsMerge([findPart(1), findPart(2)]),
+           r => r.keep.qty === 492 && !findPart(2));
+    tryOne("partsSetMfr", () => partsSetMfr([findPart(1), findPart(6)], "ACME"),
+           () => findPart(1).mfr === "ACME" && findPart(6).mfr === "ACME");
+    tryOne("mfrRename", () => mfrRename("UNI-ROYAL", "Uniroyal"),
+           r => r.n > 0 && !db.parts.some(p => p.mfr === "UNI-ROYAL"));
+    tryOne("catMoveParts", () => catMoveParts("Resistors", "Capacitors"),
+           r => r.n > 0 && !db.parts.some(p => p.cat === "Resistors"));
+    tryOne("catDelete", () => catDelete("Resistors"), r => r.err === "Move its parts out first");
+    tryOne("catSort", () => catSort(true), () => db.categories[0] !== undefined);
+    tryOne("catMoveTo", () => catMoveTo("Diodes", "Resistors", false), () => db.categories[0] === "Diodes");
+    tryOne("catMinFill", () => catMinFill(), r => r.n === db.categories.length);
+    out.dropNone = catMoveTo("Resistors", "Capacitors", false) === null;   /* it is already above it */
+    out.shift = [catShift(db.categories[0], -1), catShift(db.categories[0], 1) && db.categories[1]];
+    catShift(db.categories[1], -1);
+    out.addTwice = [catAdd("Zeta").err, catAdd("Zeta").err];
+    out.rename = [catRename("Zeta", "Resistors").err, catRename("Zeta", "Omega").err, db.categories.includes("Omega")];
+    out.del = catDelete("Omega").err === undefined && !db.categories.includes("Omega");
+    db = normalize(JSON.parse(out.snap)); delete out.snap; render();
+    return out;
+  });
+  for(const k of Object.keys(ac).filter(k => Array.isArray(ac[k]) && ac[k].length === 2 && typeof ac[k][0] === "boolean" && typeof ac[k][1] === "boolean"))
+    check(k + " does its change and undoes it exactly", ac[k][0] && ac[k][1], ac[k]);
+  check("saving a board under a name already there, in any case, replaces it",
+        eq(ac.bomSave, [false, true, [1]]), ac.bomSave);
+  check("a drop where the category already is is no change", ac.dropNone === true);
+  check("the first category cannot move up; moving it down moves it", ac.shift[0] === false && !!ac.shift[1], ac.shift);
+  check("a category name is refused the second time", eq(ac.addTwice, [undefined, "That category already exists"]), ac.addTwice);
+  check("a rename onto an existing name is refused", eq(ac.rename, ["That category already exists", undefined, true]), ac.rename);
+  check("an empty category can be deleted", ac.del === true);
+
+  const clicks = await page.evaluate(async () => {
+    const out = {};
+    const tap = id => document.getElementById(id).click();
+    ui.view = "data"; render();
+    const was = db.categories.slice();
+    tap("catSortAz");
+    out.sorted = db.categories.join() === was.slice().sort((x, y) => x.localeCompare(y)).join();
+    document.querySelector("#toast .undo").click();
+    out.undone = db.categories.join() === was.join();
+    ui.view = "bom"; render();
+    document.getElementById("bomName").value = "Clicked board";
+    document.getElementById("bomText").value = "Designator,Value,Footprint\nR1,10k,0402";
+    tap("bomSave");
+    const b = db.boms.find(x => x.name === "Clicked board");
+    out.saved = !!b && /Saved Clicked board/.test(document.getElementById("toast").textContent);
+    if(b){ db.boms = db.boms.filter(x => x !== b); ui.bomName = ""; ui.bomText = ""; }
+    ui.view = "parts"; render();
+    return out;
+  });
+  check("Sort A to Z from the Data tab sorts, and its Undo puts the order back", clicks.sorted && clicks.undone, clicks);
+  check("Save board from the BOM tab saves it and says so", clicks.saved, clicks);
+
+  const pv = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
+  const av = await page.evaluate(() => APP_VERSION);
+  check("package.json and the page carry the same version", pv === av, {package:pv, page:av});
+
   console.log("fields from a newer page");
   const uk = await page.evaluate(() => {
     const d = normalize({app:"2.3.0", future:{x:1}, parts:[{id:1, mpn:"A", qty:"5", spice:"r.lib"}],

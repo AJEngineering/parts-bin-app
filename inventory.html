@@ -385,7 +385,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "2.4.0";
+const APP_VERSION = "2.4.1";
 const REPO_URL = "https://github.com/AJEngineering/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -403,6 +403,63 @@ const $  = (s,r=document)=>r.querySelector(s);
 const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const num = n => (Math.round(n*100)/100).toLocaleString("en-US");
+
+/* ------------------------------------------------------------ versions ---
+   The data file carries the version of the page that last saved it. A page
+   older than that still reads it, but will not push it on its own: it
+   could not know what the newer one meant by a field it has never seen.  */
+let newerData = "";                 /* version of a newer page, when one wrote the data */
+let newerOk = "", newerWarned = false;   /* pushing over that version was allowed once by hand */
+function verCmp(a, b){
+  const pa = String(a||"0").split(".").map(Number), pb = String(b||"0").split(".").map(Number);
+  for(let i=0;i<3;i++){ const d = (pa[i]||0) - (pb[i]||0); if(d) return d>0?1:-1; }
+  return 0;
+}
+function noteVersion(d){
+  newerData = d && verCmp(d.app, APP_VERSION) > 0 ? String(d.app) : "";
+}
+
+/* Every field this page does not know is carried through untouched: a newer
+   page may have written it, and pushing must not strip it. `base` is set
+   when the copy is only GitHub's last agreed version, not the bin itself. */
+function normalize(d, base){
+  d.parts = (d.parts||[]).map((p,i)=>Object.assign({}, p, {
+    id: Number(p.id||i+1), cat:String(p.cat||"").trim(), lcsc:(p.lcsc||"").toUpperCase().trim(), mpn:String(p.mpn||"").trim(),
+    val:p.val||"", pkg:padPkg(p.pkg), mfr:p.mfr||"", qty:Number(p.qty||0),
+    min:(p.min===null||p.min===undefined||p.min==="")?null:Number(p.min),
+    box:(p.box||"").toUpperCase(), desc:p.desc||"", src:p.src||"", ds:p.ds||"", img:p.img||"",
+    /* unit price in USD at the smallest LCSC break, null when unknown */
+    price:(p.price===null||p.price===undefined||p.price===""||!isFinite(Number(p.price)))?null:Number(p.price)
+  }));
+  /* "Rectifiers " and "Rectifiers" are one shelf - a trailing space split it in two */
+  const cats = new Set((d.categories||[]).map(c=>String(c).trim()).filter(Boolean));
+  d.parts.forEach(p=>{ if(p.cat) cats.add(p.cat); });
+  d.categories = [...cats];
+  d.log = Array.isArray(d.log)? d.log : [];
+  d.boms = Array.isArray(d.boms) ? d.boms.map(b=>Object.assign({}, b, {
+    id:Number(b.id||Date.now()), name:String(b.name||"board"), text:String(b.text||""),
+    boards:Number(b.boards||1), updated:String(b.updated||""), reserve:Math.max(0, Number(b.reserve||0))
+  })) : [];
+  /* alert level per category: keep only real numbers, keyed by the trimmed name */
+  const cm = {};
+  Object.entries(d.catMin && typeof d.catMin==="object" ? d.catMin : {}).forEach(([k,v])=>{
+    if(v!==null && v!=="" && isFinite(Number(v))) cm[String(k).trim()] = Number(v); });
+  d.catMin = cm;
+  /* orders placed and not yet on the shelf. Kept in the data file, so the
+     bench that ordered and the bench that unpacks are the same list.    */
+  d.pending = Array.isArray(d.pending) ? d.pending.map(o=>Object.assign({}, o, {
+    id:Number(o.id||Date.now()), at:String(o.at||""),
+    lines:(Array.isArray(o.lines)?o.lines:[]).map(l=>Object.assign({}, l, {
+      pid:(l.pid===null||l.pid===undefined)?null:Number(l.pid),
+      lcsc:(l.lcsc||"").toUpperCase(), mpn:l.mpn||"", val:l.val||"", cat:l.cat||"",
+      qty:Number(l.qty||0), box:(l.box||"").toUpperCase(),
+      desc:l.desc||"", pkg:padPkg(l.pkg)
+    })).filter(l=>l.qty>0)
+  })).filter(o=>o.lines.length) : [];
+  d.version = 1;
+  if(!base) noteVersion(d);
+  return d;
+}
 
 /* ---------------------------------------------------------------- storage */
 /* A file handle survives a reload only if it is stored in IndexedDB. Every
@@ -674,7 +731,7 @@ function mergeById(B, M, T, both){
     out.push(m);                                 /* added here - or edited here */
   }
   /* two different parts that happened to take the same next number */
-  let next = out.reduce((n,x)=>Math.max(n, Number(x.id)||0), 0) + 1;
+  let next = nextId(out);
   twins.forEach(m=> out.push(Object.assign({}, m, {id: next++})));
   return out;
 }
@@ -2402,6 +2459,359 @@ function lcscPrice(r){
 const SI_IN = {p:1e-12, n:1e-9, u:1e-6, "\u00b5":1e-6, m:1e-3, R:1, r:1, E:1,
                k:1e3, K:1e3, M:1e6, G:1e9, T:1e12};
 
+/* --------------------------------------------------- writing a spreadsheet -
+   Every fab takes CSV, so this looked unnecessary until you watch what Excel
+   does when the fab opens it: 0402 is read as a number and comes out 402, the
+   very thing that was just put right on the way in. A cell in a real sheet
+   can be marked as text and the zero stays.
+
+   An .xlsx is a zip of XML files. Nothing here needs compressing, and a zip
+   that stores rather than deflates is short enough to write by hand - which
+   keeps the promise that this page carries no dependencies.               */
+let CRC_TBL = null;
+function crc32(bytes){
+  if(!CRC_TBL){
+    CRC_TBL = new Uint32Array(256);
+    for(let i=0;i<256;i++){
+      let c = i;
+      for(let k=0;k<8;k++) c = (c & 1) ? (0xEDB88320 ^ (c>>>1)) : (c>>>1);
+      CRC_TBL[i] = c>>>0;
+    }
+  }
+  let c = 0xFFFFFFFF;
+  for(let i=0;i<bytes.length;i++) c = CRC_TBL[(c ^ bytes[i]) & 0xFF] ^ (c>>>8);
+  return (c ^ 0xFFFFFFFF)>>>0;
+}
+
+function zipStore(files){
+  const enc = new TextEncoder();
+  const u16 = n => [n&255, (n>>>8)&255];
+  const u32 = n => [n&255, (n>>>8)&255, (n>>>16)&255, (n>>>24)&255];
+  /* A DOS stamp of zero means day 0 of month 0, which is not a date. Some
+     readers shrug; a strict one refuses the whole archive, and the upload
+     comes back as a system error with nothing said about why.            */
+  const d = new Date();
+  const time = ((d.getHours()<<11) | (d.getMinutes()<<5) | (d.getSeconds()>>1)) & 0xFFFF;
+  const date = (((d.getFullYear()-1980)<<9) | ((d.getMonth()+1)<<5) | d.getDate()) & 0xFFFF;
+  const parts = [], dir = [];
+  let at = 0;
+  for(const f of files){
+    const name = enc.encode(f.name), data = enc.encode(f.text), crc = crc32(data);
+    const local = new Uint8Array([...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0),
+      ...u16(time), ...u16(date), ...u32(crc), ...u32(data.length), ...u32(data.length),
+      ...u16(name.length), ...u16(0)]);
+    parts.push(local, name, data);
+    dir.push({name, crc, size:data.length, at});
+    at += local.length + name.length + data.length;
+  }
+  const central = [];
+  let cdLen = 0;
+  for(const e of dir){
+    const h = new Uint8Array([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0),
+      ...u16(time), ...u16(date), ...u32(e.crc), ...u32(e.size), ...u32(e.size),
+      ...u16(e.name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(e.at)]);
+    central.push(h, e.name);
+    cdLen += h.length + e.name.length;
+  }
+  const end = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0),
+    ...u16(dir.length), ...u16(dir.length), ...u32(cdLen), ...u32(at), ...u16(0)]);
+  return new Blob(parts.concat(central, [end]),
+    {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+}
+
+const xmlEsc = s => String(s==null?"":s).replace(/[&<>"']/g,
+  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&apos;"}[c]));
+function colName(n){ let s=""; n++; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=(n-m-1)/26; } return s; }
+
+/* rows: an array of arrays. A finite number is written as a number; anything
+   else goes in as text, which is what keeps 0402 from becoming 402.
+
+   Written the long way on purpose. A sheet with nothing but sheetData opens
+   in Excel and passes a zip check, and is still refused by the parsers a
+   board house runs: they want the shared string table rather than strings
+   inlined, they expect a stylesheet to exist, and several read the declared
+   dimension before the rows. NextPCB answered such a file with an unexplained
+   system error. So the parts every reader looks for are all present.      */
+function xlsxBlob(sheetName, rows){
+  const P = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+  /* one entry per distinct string, cells point at it by index */
+  const strings = [], seen = new Map();
+  const strIdx = s => {
+    if(seen.has(s)) return seen.get(s);
+    const i = strings.length; strings.push(s); seen.set(s, i); return i;
+  };
+  let cellCount = 0, wide = 0;
+  const sheet = rows.map((cells,r)=>{
+    if(cells.length > wide) wide = cells.length;
+    const cs = cells.map((v,c)=>{
+      const ref = colName(c)+(r+1);
+      if(typeof v === "number" && isFinite(v)){ cellCount++; return `<c r="${ref}"><v>${v}</v></c>`; }
+      const s = String(v==null?"":v);
+      if(!s) return `<c r="${ref}"/>`;
+      cellCount++;
+      return `<c r="${ref}" t="s"><v>${strIdx(s)}</v></c>`;
+    }).join("");
+    return `<row r="${r+1}" spans="1:${cells.length||1}">${cs}</row>`;
+  }).join("");
+  const dim = "A1:" + colName(Math.max(0, wide-1)) + Math.max(1, rows.length);
+  const stamp = new Date().toISOString().replace(/\.\d+Z$/,"Z");
+
+  return zipStore([
+    {name:"[Content_Types].xml", text:P+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">`+
+      `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>`+
+      `<Default Extension="xml" ContentType="application/xml"/>`+
+      `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`+
+      `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`+
+      `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>`+
+      `<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>`+
+      `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`+
+      `<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`},
+
+    {name:"_rels/.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
+      `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/>`+
+      `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>`+
+      `<Relationship Id="rId3" Type="${REL}/extended-properties" Target="docProps/app.xml"/></Relationships>`},
+
+    {name:"docProps/core.xml", text:P+`<cp:coreProperties `+
+      `xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" `+
+      `xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" `+
+      `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">`+
+      `<dc:title>${xmlEsc(sheetName)}</dc:title><dc:creator>Parts Bin</dc:creator>`+
+      `<cp:lastModifiedBy>Parts Bin</cp:lastModifiedBy>`+
+      `<dcterms:created xsi:type="dcterms:W3CDTF">${stamp}</dcterms:created>`+
+      `<dcterms:modified xsi:type="dcterms:W3CDTF">${stamp}</dcterms:modified></cp:coreProperties>`},
+
+    {name:"docProps/app.xml", text:P+`<Properties `+
+      `xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" `+
+      `xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">`+
+      `<Application>Parts Bin</Application></Properties>`},
+
+    {name:"xl/workbook.xml", text:P+`<workbook xmlns="${NS}" xmlns:r="${REL}">`+
+      `<workbookPr/><bookViews><workbookView xWindow="0" yWindow="0" windowWidth="16384" windowHeight="8192"/></bookViews>`+
+      `<sheets><sheet name="${xmlEsc(sheetName).slice(0,31)}" sheetId="1" r:id="rId1"/></sheets></workbook>`},
+
+    {name:"xl/_rels/workbook.xml.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
+      `<Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/>`+
+      `<Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/>`+
+      `<Relationship Id="rId3" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/></Relationships>`},
+
+    /* the smallest stylesheet Excel calls valid: the first two fills and the
+       one cellXfs entry are required even when nothing is styled           */
+    {name:"xl/styles.xml", text:P+`<styleSheet xmlns="${NS}">`+
+      `<fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts>`+
+      `<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>`+
+      `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>`+
+      `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>`+
+      `<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>`+
+      `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>`+
+      `</styleSheet>`},
+
+    {name:"xl/sharedStrings.xml", text:P+`<sst xmlns="${NS}" count="${cellCount}" uniqueCount="${strings.length}">`+
+      strings.map(s=>`<si><t xml:space="preserve">${xmlEsc(s)}</t></si>`).join("")+`</sst>`},
+
+    {name:"xl/worksheets/sheet1.xml", text:P+`<worksheet xmlns="${NS}" xmlns:r="${REL}">`+
+      `<dimension ref="${dim}"/>`+
+      `<sheetViews><sheetView tabSelected="1" workbookViewId="0"/></sheetViews>`+
+      `<sheetFormatPr defaultRowHeight="15"/>`+
+      `<sheetData>${sheet}</sheetData></worksheet>`}
+  ]);
+}
+function toCsv(){
+  const cols = ["cat","mfr","lcsc","mpn","val","pkg","qty","min","box","desc","src","ds","img"];
+  const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
+  return [cols.join(",")].concat(db.parts.map(p=>cols.map(c=>q(p[c])).join(","))).join("\r\n");
+}
+
+/* ------------------------------------------------------------ used in ----
+   Which saved boards call for a part, and how many per board. Worked out
+   from the BOM text the same way the BOM tab matches it, cached per edit.  */
+let useCache = {at:null, map:new Map()};
+function usedInMap(){
+  const key = resKey() + "|" + prefs.bomMatch;      /* the match mode changes which part a line names */
+  if(useCache.at === key) return useCache.map;
+  const map = new Map();
+  (db.boms||[]).forEach(b=>{
+    parseBom(b.text).forEach(r=>{
+      const m = matchBom(r);
+      if(!m.p) return;
+      const list = map.get(m.p.id) || [];
+      const hit = list.find(x=>x.id===b.id);
+      if(hit) hit.per += (r.need||1); else list.push({id:b.id, name:b.name, per:(r.need||1), reserve:Number(b.reserve||0)});
+      map.set(m.p.id, list);
+    });
+  });
+  useCache = {at:key, map};
+  return map;
+}
+const usedIn = p => usedInMap().get(p.id) || [];
+function usedInText(p){
+  return usedIn(p).map(u=>u.name+" ×"+u.per+(u.reserve?" (holding "+u.reserve+")":"")).join(" · ");
+}
+
+/* ------------------------------------------------------------- QR code ---
+   A box label carries a QR code that opens the page on that box. No library:
+   byte mode, error correction level M, versions 1 to 10 (up to 213 bytes),
+   which is all a link needs. Follows ISO/IEC 18004 the way Project Nayuki's
+   reference generator lays it out.                                         */
+const QR_ECC = [0,10,16,26,18,24,16,18,22,22,26];    /* EC codewords per block, level M */
+const QR_BLK = [0,1,1,1,2,2,4,4,4,5,5];              /* blocks, level M */
+function qrRawModules(v){
+  let r = (16*v + 128)*v + 64;
+  if(v >= 2){ const n = Math.floor(v/7) + 2; r -= (25*n - 10)*n - 55; if(v >= 7) r -= 36; }
+  return r;
+}
+function qrMul(x, y){
+  let z = 0;
+  for(let i=7;i>=0;i--){ z = (z<<1) ^ ((z>>>7) * 0x11D); z ^= ((y>>>i)&1) * x; }
+  return z & 0xFF;
+}
+function qrDivisor(deg){
+  const r = new Array(deg).fill(0); r[deg-1] = 1;
+  let root = 1;
+  for(let i=0;i<deg;i++){
+    for(let j=0;j<deg;j++){ r[j] = qrMul(r[j], root); if(j+1<deg) r[j] ^= r[j+1]; }
+    root = qrMul(root, 2);
+  }
+  return r;
+}
+function qrRemainder(data, div){
+  const r = div.map(()=>0);
+  for(const b of data){
+    const f = b ^ r.shift(); r.push(0);
+    div.forEach((c,i)=>{ r[i] ^= qrMul(c, f); });
+  }
+  return r;
+}
+function qrEncode(text){
+  const data = Array.from(new TextEncoder().encode(text));
+  const dataCw = v => Math.floor(qrRawModules(v)/8) - QR_ECC[v]*QR_BLK[v];
+  let ver = 1;
+  for(; ver<=10; ver++) if(4 + (ver<10?8:16) + data.length*8 <= dataCw(ver)*8) break;
+  if(ver > 10) throw new Error("too long for a QR label");
+  /* data bits: byte mode, count, bytes, terminator, padding */
+  const bits = [];
+  const put = (v,n)=>{ for(let i=n-1;i>=0;i--) bits.push((v>>>i)&1); };
+  put(4,4); put(data.length, ver<10?8:16); data.forEach(b=>put(b,8));
+  const cap = dataCw(ver)*8;
+  put(0, Math.min(4, cap-bits.length)); put(0, (8 - bits.length%8) % 8);
+  for(let p=0xEC; bits.length<cap; p ^= 0xEC^0x11) put(p,8);
+  const cw = [];
+  for(let i=0;i<bits.length;i+=8){ let b=0; for(let j=0;j<8;j++) b = (b<<1)|bits[i+j]; cw.push(b); }
+  /* error correction, split into blocks and interleaved */
+  const nb = QR_BLK[ver], ecl = QR_ECC[ver], raw = Math.floor(qrRawModules(ver)/8);
+  const nShort = nb - raw%nb, shortLen = Math.floor(raw/nb), div = qrDivisor(ecl);
+  const blocks = [];
+  for(let i=0,k=0;i<nb;i++){
+    const dat = cw.slice(k, k + shortLen - ecl + (i<nShort?0:1)); k += dat.length;
+    const ec = qrRemainder(dat, div);
+    if(i < nShort) dat.push(0);
+    blocks.push(dat.concat(ec));
+  }
+  const all = [];
+  for(let i=0;i<blocks[0].length;i++) blocks.forEach((b,j)=>{ if(i!==shortLen-ecl || j>=nShort) all.push(b[i]); });
+
+  const size = ver*4 + 17;
+  const mod = Array.from({length:size}, ()=>new Array(size).fill(false));
+  const fn  = Array.from({length:size}, ()=>new Array(size).fill(false));
+  const setF = (x,y,on)=>{ mod[y][x] = on; fn[y][x] = true; };
+  for(let i=0;i<size;i++){ setF(6,i,i%2===0); setF(i,6,i%2===0); }
+  [[3,3],[size-4,3],[3,size-4]].forEach(([cx,cy])=>{
+    for(let dy=-4;dy<=4;dy++) for(let dx=-4;dx<=4;dx++){
+      const x=cx+dx, y=cy+dy, d=Math.max(Math.abs(dx),Math.abs(dy));
+      if(x>=0 && x<size && y>=0 && y<size) setF(x,y, d!==2 && d!==4);
+    }
+  });
+  if(ver > 1){
+    const n = Math.floor(ver/7) + 2, step = Math.ceil((ver*4 + 4)/(n*2 - 2))*2;
+    const pos = [6];
+    for(let p=size-7; pos.length<n; p-=step) pos.splice(1,0,p);
+    pos.forEach((y,i)=>pos.forEach((x,j)=>{
+      if((i===0&&j===0) || (i===0&&j===n-1) || (i===n-1&&j===0)) return;
+      for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++) setF(x+dx, y+dy, Math.max(Math.abs(dx),Math.abs(dy))!==1);
+    }));
+  }
+  const drawFormat = mask=>{
+    const d = (0<<3) | mask;                 /* level M = 00 */
+    let rem = d; for(let i=0;i<10;i++) rem = (rem<<1) ^ ((rem>>>9) * 0x537);
+    const b = ((d<<10) | rem) ^ 0x5412, bit = i=>((b>>>i)&1)===1;
+    for(let i=0;i<=5;i++) setF(8,i,bit(i));
+    setF(8,7,bit(6)); setF(8,8,bit(7)); setF(7,8,bit(8));
+    for(let i=9;i<15;i++) setF(14-i,8,bit(i));
+    for(let i=0;i<8;i++) setF(size-1-i,8,bit(i));
+    for(let i=8;i<15;i++) setF(8,size-15+i,bit(i));
+    setF(8,size-8,true);
+  };
+  drawFormat(0);
+  if(ver >= 7){
+    let rem = ver; for(let i=0;i<12;i++) rem = (rem<<1) ^ ((rem>>>11) * 0x1F25);
+    const b = (ver<<12) | rem;
+    for(let i=0;i<18;i++){
+      const on = ((b>>>i)&1)===1, a = size-11+i%3, c = Math.floor(i/3);
+      setF(a,c,on); setF(c,a,on);
+    }
+  }
+  /* the codewords, zigzagging up and down in column pairs */
+  let k = 0;
+  for(let right=size-1; right>=1; right-=2){
+    if(right===6) right = 5;
+    for(let v=0; v<size; v++) for(let j=0;j<2;j++){
+      const x = right-j, up = ((right+1)&2)===0, y = up ? size-1-v : v;
+      if(!fn[y][x] && k < all.length*8){ mod[y][x] = ((all[k>>>3]>>>(7-(k&7)))&1)===1; k++; }
+    }
+  }
+  const maskOn = (m,x,y)=>[
+    (x+y)%2===0, y%2===0, x%3===0, (x+y)%3===0,
+    (Math.floor(x/3)+Math.floor(y/2))%2===0, x*y%2 + x*y%3===0,
+    (x*y%2 + x*y%3)%2===0, ((x+y)%2 + x*y%3)%2===0][m];
+  const applyMask = m=>{ for(let y=0;y<size;y++) for(let x=0;x<size;x++) if(!fn[y][x] && maskOn(m,x,y)) mod[y][x] = !mod[y][x]; };
+  /* every mask decodes; the spec's penalty picks the one that scans best.
+     Runs, 2x2 blocks and balance are scored - enough to avoid the bad ones. */
+  const penalty = ()=>{
+    let p = 0, dark = 0;
+    for(let a=0;a<size;a++){
+      let rr=1, rc=1;
+      for(let b=1;b<size;b++){
+        if(mod[a][b]===mod[a][b-1]){ if(++rr===5) p+=3; else if(rr>5) p++; } else rr=1;
+        if(mod[b][a]===mod[b-1][a]){ if(++rc===5) p+=3; else if(rc>5) p++; } else rc=1;
+      }
+    }
+    for(let y=0;y<size;y++) for(let x=0;x<size;x++){
+      if(mod[y][x]) dark++;
+      if(x<size-1 && y<size-1){ const c=mod[y][x]; if(c===mod[y][x+1] && c===mod[y+1][x] && c===mod[y+1][x+1]) p+=3; }
+    }
+    return p + Math.floor(Math.abs(dark*20 - size*size*10)/(size*size)) * 10;
+  };
+  let best = 0, bestP = Infinity;
+  for(let m=0;m<8;m++){
+    applyMask(m); drawFormat(m);
+    const p = penalty();
+    if(p < bestP){ bestP = p; best = m; }
+    applyMask(m);
+  }
+  applyMask(best); drawFormat(best);
+  return mod;
+}
+/* drawn as one SVG path with the four-module quiet zone the spec asks for */
+function qrSvg(text, px){
+  let m;
+  try{ m = qrEncode(text); }catch(e){ return ""; }
+  const n = m.length, q = 4, w = n + q*2;
+  let d = "";
+  for(let y=0;y<n;y++) for(let x=0;x<n;x++) if(m[y][x]) d += `M${x+q},${y+q}h1v1h-1z`;
+  return `<svg class="qr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${w}" width="${px}" height="${px}"
+    shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="${w}" height="${w}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+}
+/* what a box label links to: this page at its own address, or the address
+   set under Labels - a page opened off the disk has no address to give    */
+function qrBase(){
+  if(prefs.qrBase) return prefs.qrBase.replace(/#.*$/,"");
+  return /^https?:$/.test(location.protocol) ? location.origin + location.pathname : "";
+}
+const boxLink = key => qrBase() + "#box=" + encodeURIComponent(key);
+
 /* ----------------------------------------------------------------- render */
 function render(){
   renderRail();
@@ -3392,6 +3802,272 @@ function bump(p, d){
   save(); render();
 }
 
+/* save, redraw, and say what happened - with an Undo when the change
+   handed one back. The undo only puts db back; this saves and redraws.  */
+function changed(msg, undo){
+  save(); render();
+  if(msg) toast(msg, "Undo", undo ? ()=>{ undo(); save(); render(); } : null);
+}
+
+/* --------------------------------------------------- changes to the data ---
+   What the buttons do to the bin itself. Each one changes db and the log
+   and nothing else: no DOM, no confirm, no save, no redraw - the wiring
+   asks, then calls one of these, then calls changed(). Each hands back
+   what the toast needs and an undo that puts db back the way it was.    */
+
+/* the next free id in a list: parts, and the twins a merge renumbers */
+const nextId = list => 1 + (list||[]).reduce((n,x)=>Math.max(n, Number(x.id)||0), 0);
+const bomFind = id => (db.boms||[]).find(x=>x.id===Number(id));
+
+/* one field on many parts; the undo puts each part's own old value back */
+function partsSet(k, pairs){
+  const before = pairs.map(([p])=>[p, p[k]||""]);
+  pairs.forEach(([p,v])=>{ p[k] = v; });
+  return ()=>before.forEach(([p,w])=>{ p[k] = w; });
+}
+
+/* a saved board under the same name (any case) is replaced, keeping its id
+   and whatever it holds reserved                                          */
+function bomSave(name, text, boards){
+  db.boms = db.boms || [];
+  const at = db.boms.findIndex(b=>b.name.toLowerCase()===name.toLowerCase());
+  const rec = {id: at>=0?db.boms[at].id:Date.now(), name, text,
+               boards: Math.max(1,Number(boards)||1),
+               reserve: at>=0?Number(db.boms[at].reserve||0):0,
+               updated: new Date().toISOString()};
+  if(at>=0) db.boms[at] = rec; else db.boms.push(rec);
+  return {updated: at>=0};
+}
+
+/* hold the parts for n boards of b; n = 0 releases them */
+function bomReserve(b, n){
+  const was = Number(b.reserve||0);
+  b.reserve = n;
+  rematchBom();
+  return {undo: ()=>{ b.reserve = was; rematchBom(); }};
+}
+
+function bomDelete(b){
+  const at = (db.boms||[]).indexOf(b);
+  db.boms = (db.boms||[]).filter(x=>x.id!==b.id);
+  return {undo: ()=>{ db.boms.splice(Math.min(at,db.boms.length),0,b); }};
+}
+
+/* Take the ticked drawers off the shelf. One movement per part, not per
+   drawer: the log is about stock, and a part taken from two drawers left
+   the shelf once. The board just built no longer needs its parts held. */
+function pickTake(rows, boards){
+  const byPart = new Map();
+  rows.forEach(r=>{
+    const e = byPart.get(r.part) || {take:0, boxes:{}};
+    e.take += r.take;
+    if(r.box) e.boxes[r.box] = (e.boxes[r.box]||0) + r.take;
+    byPart.set(r.part, e);
+  });
+  const undo = [];
+  byPart.forEach((e, p)=>{
+    const was = Number(p.qty||0), wasBox = p.box;
+    undo.push({p, was, wasBox});
+    p.qty = Math.max(0, was - e.take);
+    p.box = boxAfterPick(p, e.boxes);
+    logAdd({k:"qty", id:p.id, mpn:p.mpn, lcsc:p.lcsc, cat:p.cat,
+            d:p.qty-was, a:was, b:p.qty});
+  });
+  const ob = (db.boms||[]).find(b=>b.id===openBomId());
+  const resWas = ob ? Number(ob.reserve||0) : 0;
+  if(ob && resWas) ob.reserve = Math.max(0, resWas - Math.max(1, Number(boards)||1));
+  rematchBom();
+  return {parts: byPart.size, bom: ob && resWas ? ob : null, undo: ()=>{
+    undo.forEach(u=>{ u.p.qty = u.was; u.p.box = u.wasBox; });
+    if(ob) ob.reserve = resWas;
+    rematchBom();
+  }};
+}
+
+/* book in an order: lines that matched a part add to it, the rest become
+   new parts with no box yet                                              */
+function orderReceive(list){
+  const undo = [];
+  list.forEach(r=>{
+    if(r.part){
+      undo.push({p:r.part, was:Number(r.part.qty||0)});
+      r.part.qty = Number(r.part.qty||0) + r.qty;
+      logAdd({k:"qty", id:r.part.id, mpn:r.part.mpn, lcsc:r.part.lcsc, cat:r.part.cat,
+              d:r.qty, a:undo[undo.length-1].was, b:r.part.qty});
+    } else {
+      const rec = {id: nextId(db.parts),
+                   cat: db.categories[0]||"Uncategorised", lcsc:r.lcsc.toUpperCase(), mpn:r.mpn,
+                   val:"", pkg:"", mfr:"", qty:r.qty, min:null, box:"", desc:"", src:"order"};
+      if(!db.categories.includes(rec.cat)) db.categories.push(rec.cat);
+      db.parts.push(rec);
+      undo.push({p:rec, isNew:true});
+      logAdd({k:"add", id:rec.id, mpn:rec.mpn, lcsc:rec.lcsc, cat:rec.cat, b:rec.qty});
+    }
+  });
+  return {added: list.filter(r=>!r.part).length, undo: ()=>{
+    undo.forEach(u=>{ if(u.isNew) db.parts = db.parts.filter(x=>x!==u.p); else u.p.qty = u.was; });
+  }};
+}
+
+function pendingCancel(o){
+  db.pending = db.pending.filter(x=>x!==o);
+  return {undo: ()=>{ db.pending.push(o); }};
+}
+
+/* one line off an order on its way; an order left empty goes with it */
+function pendingDrop(o, ix){
+  const gone = o.lines.splice(ix,1)[0];
+  if(!o.lines.length) db.pending = db.pending.filter(x=>x!==o);
+  return {gone, undo: ()=>{
+    if(!db.pending.includes(o)) db.pending.push(o);
+    o.lines.splice(ix,0,gone);
+  }};
+}
+
+/* Duplicates into the first of them. Boxes become an explicit split so no
+   quantity is invented or lost; an empty field takes the first filled one. */
+function partsMerge(list){
+  const snapshot = list.map(p=>({p, copy:JSON.parse(JSON.stringify(p))}));
+  const keep = list[0];
+  const boxes = [];
+  list.forEach(p=>{
+    partBoxes(p).forEach(tk=>{
+      const q = qtyInBox(p, tk.key)||0;
+      const e = boxes.find(b=>b.key===tk.key);
+      if(e) e.q += q; else boxes.push({key:tk.key, q:q});
+    });
+  });
+  keep.qty = list.reduce((s,p)=>s+Number(p.qty||0),0);
+  keep.box = boxes.map(b=> boxes.length>1 ? b.key+":"+Math.round(b.q) : b.key).join(" + ");
+  list.slice(1).forEach(p=>{
+    if(!keep.lcsc && p.lcsc) keep.lcsc = p.lcsc;
+    if(!keep.mfr  && p.mfr)  keep.mfr  = p.mfr;
+    if(!keep.src  && p.src)  keep.src  = p.src;
+    if(!keep.desc && p.desc) keep.desc = p.desc;
+  });
+  const gone = list.slice(1).map(p=>({p, at:db.parts.indexOf(p)}));
+  const drop = new Set(list.slice(1));
+  db.parts = db.parts.filter(p=>!drop.has(p) || p===keep);
+  logAdd({k:"edit", id:keep.id, mpn:keep.mpn, lcsc:keep.lcsc, cat:keep.cat,
+          b:keep.qty, d:0});
+  return {keep, undo: ()=>{
+    snapshot.forEach(sn=>Object.assign(sn.p, sn.copy));
+    gone.sort((a,b)=>a.at-b.at).forEach(g=>db.parts.splice(Math.min(g.at, db.parts.length),0,g.p));
+  }};
+}
+
+function partsSetMfr(list, name){
+  const undo = partsSet("mfr", list.map(p=>[p, name]));
+  logAdd({k:"edit", mpn:"("+list.length+" parts)", cat:name||"cleared manufacturer"});
+  return {undo};
+}
+
+/* hits: [{p, val}] from guessValueList */
+function partsFillValues(hits){
+  const undo = partsSet("val", hits.map(h=>[h.p, h.val]));
+  logAdd({k:"edit", mpn:"("+hits.length+" parts)", cat:"value read from description"});
+  return {undo};
+}
+
+/* hits: [{p, name}] from suggestMfr */
+function partsFillMfr(hits){
+  const undo = partsSet("mfr", hits.map(h=>[h.p, h.name]));
+  logAdd({k:"edit", mpn:"("+hits.length+" parts)", cat:"manufacturer from part number"});
+  return {undo};
+}
+
+/* a name that already exists merges the two */
+function mfrRename(from, to){
+  const hit = db.parts.filter(p=>(p.mfr||"")===from);
+  return {n: hit.length, undo: partsSet("mfr", hit.map(p=>[p, to]))};
+}
+
+/* GitHub's value into each listed clash */
+function conflictsTake(pick){
+  pick.forEach(x=>{ const p = x && findPart(x.id); if(p) p[x.k] = x.theirs; });
+}
+
+function catAdd(name){
+  if(db.categories.includes(name)) return {err:"That category already exists"};
+  db.categories.push(name);
+  return {};
+}
+
+/* the name carries everything with it: parts, and the category's alert level */
+function catRename(from, to){
+  if(to!==from && db.categories.includes(to)) return {err:"That category already exists"};
+  db.categories = db.categories.map(c=>c===from?to:c);
+  db.parts.forEach(p=>{ if(p.cat===from) p.cat=to; });
+  if(db.catMin && db.catMin[from]!=null && to!==from){ db.catMin[to] = db.catMin[from]; delete db.catMin[from]; }
+  return {};
+}
+
+function catMoveParts(from, to){
+  const moved = db.parts.filter(p=>p.cat===from);
+  return {n: moved.length, undo: partsSet("cat", moved.map(p=>[p, to]))};
+}
+
+/* only an empty category can go */
+function catDelete(c){
+  if(db.parts.some(p=>p.cat===c)) return {err:"Move its parts out first"};
+  const at = db.categories.indexOf(c);
+  db.categories = db.categories.filter(x=>x!==c);
+  return {undo: ()=>{ db.categories.splice(Math.min(at, db.categories.length), 0, c); }};
+}
+
+/* one place up (dir -1) or down (dir 1); false at either end */
+function catShift(name, dir){
+  const a = db.categories, i = a.indexOf(name), j = i + dir;
+  if(i<0 || j<0 || j>=a.length) return false;
+  a[i] = a[j]; a[j] = name;
+  return true;
+}
+
+/* A to Z, or the fullest first */
+function catSort(byUse){
+  const was = db.categories.slice();
+  if(!byUse) db.categories.sort((x,y)=>x.localeCompare(y));
+  else {
+    const n = c => db.parts.filter(p=>p.cat===c).length;
+    db.categories.sort((x,y)=> n(y)-n(x) || x.localeCompare(y));
+  }
+  return {undo: ()=>{ db.categories = was; }};
+}
+
+/* a starting alert level on every category that has none */
+function catMinFill(){
+  db.catMin = db.catMin || {};
+  const was = Object.assign({}, db.catMin);
+  const set = db.categories.filter(c=>db.catMin[c]==null);
+  if(!set.length) return {err:"Every category already has a level"};
+  set.forEach(c=>{ db.catMin[c] = suggestCatMin(c); });
+  return {n: set.length, undo: ()=>{ db.catMin = was; }};
+}
+
+/* a category dropped above or below another; null when it did not move */
+function catMoveTo(name, target, below){
+  const a = db.categories, from = a.indexOf(name);
+  if(from < 0) return null;
+  const was = a.slice();
+  a.splice(from, 1);
+  const to = a.indexOf(target);
+  if(to < 0){ db.categories = was; return null; }
+  a.splice(below ? to+1 : to, 0, name);
+  if(a.join("\0")===was.join("\0")) return null;   /* landed where it began */
+  return {undo: ()=>{ db.categories = was; }};
+}
+
+/* "" or anything not a number goes back to the default */
+function catMinSet(c, v){
+  db.catMin = db.catMin || {};
+  if(v==="" || !isFinite(Number(v))) delete db.catMin[c]; else db.catMin[c] = Math.max(0, Math.floor(Number(v)));
+}
+
+/* the drawer a line on its way is meant for */
+function pendingLineBox(l, box){ l.box = String(box).trim().toUpperCase(); }
+
+function logClear(){ db.log = []; }
+
 /* `seed` pre-fills a blank form - the free drawer on the wall uses it to hand
    over the box number it is standing for, and "add another" hands back the
    box and the shelf so a whole drawer can be filled without stopping.       */
@@ -3460,7 +4136,7 @@ function openEditor(p, seed){
                  price:get("price")===""||!isFinite(Number(get("price")))?null:Number(get("price")),
                  qty:Number(f.get("qty")||0), min:get("min")===""?null:Number(f.get("min"))};
     if(isNew){
-      rec.id = 1+db.parts.reduce((m,p)=>Math.max(m,p.id),0);
+      rec.id = nextId(db.parts);
       db.parts.push(rec);
       logAdd({k:"add", id:rec.id, mpn:rec.mpn, lcsc:rec.lcsc, cat:rec.cat, b:rec.qty});
     } else {
@@ -3679,1205 +4355,6 @@ function download(name, data, type){
   a.download = name; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
 }
-
-/* --------------------------------------------------- writing a spreadsheet -
-   Every fab takes CSV, so this looked unnecessary until you watch what Excel
-   does when the fab opens it: 0402 is read as a number and comes out 402, the
-   very thing that was just put right on the way in. A cell in a real sheet
-   can be marked as text and the zero stays.
-
-   An .xlsx is a zip of XML files. Nothing here needs compressing, and a zip
-   that stores rather than deflates is short enough to write by hand - which
-   keeps the promise that this page carries no dependencies.               */
-let CRC_TBL = null;
-function crc32(bytes){
-  if(!CRC_TBL){
-    CRC_TBL = new Uint32Array(256);
-    for(let i=0;i<256;i++){
-      let c = i;
-      for(let k=0;k<8;k++) c = (c & 1) ? (0xEDB88320 ^ (c>>>1)) : (c>>>1);
-      CRC_TBL[i] = c>>>0;
-    }
-  }
-  let c = 0xFFFFFFFF;
-  for(let i=0;i<bytes.length;i++) c = CRC_TBL[(c ^ bytes[i]) & 0xFF] ^ (c>>>8);
-  return (c ^ 0xFFFFFFFF)>>>0;
-}
-
-function zipStore(files){
-  const enc = new TextEncoder();
-  const u16 = n => [n&255, (n>>>8)&255];
-  const u32 = n => [n&255, (n>>>8)&255, (n>>>16)&255, (n>>>24)&255];
-  /* A DOS stamp of zero means day 0 of month 0, which is not a date. Some
-     readers shrug; a strict one refuses the whole archive, and the upload
-     comes back as a system error with nothing said about why.            */
-  const d = new Date();
-  const time = ((d.getHours()<<11) | (d.getMinutes()<<5) | (d.getSeconds()>>1)) & 0xFFFF;
-  const date = (((d.getFullYear()-1980)<<9) | ((d.getMonth()+1)<<5) | d.getDate()) & 0xFFFF;
-  const parts = [], dir = [];
-  let at = 0;
-  for(const f of files){
-    const name = enc.encode(f.name), data = enc.encode(f.text), crc = crc32(data);
-    const local = new Uint8Array([...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0),
-      ...u16(time), ...u16(date), ...u32(crc), ...u32(data.length), ...u32(data.length),
-      ...u16(name.length), ...u16(0)]);
-    parts.push(local, name, data);
-    dir.push({name, crc, size:data.length, at});
-    at += local.length + name.length + data.length;
-  }
-  const central = [];
-  let cdLen = 0;
-  for(const e of dir){
-    const h = new Uint8Array([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0),
-      ...u16(time), ...u16(date), ...u32(e.crc), ...u32(e.size), ...u32(e.size),
-      ...u16(e.name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(e.at)]);
-    central.push(h, e.name);
-    cdLen += h.length + e.name.length;
-  }
-  const end = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0),
-    ...u16(dir.length), ...u16(dir.length), ...u32(cdLen), ...u32(at), ...u16(0)]);
-  return new Blob(parts.concat(central, [end]),
-    {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
-}
-
-const xmlEsc = s => String(s==null?"":s).replace(/[&<>"']/g,
-  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&apos;"}[c]));
-function colName(n){ let s=""; n++; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=(n-m-1)/26; } return s; }
-
-/* rows: an array of arrays. A finite number is written as a number; anything
-   else goes in as text, which is what keeps 0402 from becoming 402.
-
-   Written the long way on purpose. A sheet with nothing but sheetData opens
-   in Excel and passes a zip check, and is still refused by the parsers a
-   board house runs: they want the shared string table rather than strings
-   inlined, they expect a stylesheet to exist, and several read the declared
-   dimension before the rows. NextPCB answered such a file with an unexplained
-   system error. So the parts every reader looks for are all present.      */
-function xlsxBlob(sheetName, rows){
-  const P = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-  const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-
-  /* one entry per distinct string, cells point at it by index */
-  const strings = [], seen = new Map();
-  const strIdx = s => {
-    if(seen.has(s)) return seen.get(s);
-    const i = strings.length; strings.push(s); seen.set(s, i); return i;
-  };
-  let cellCount = 0, wide = 0;
-  const sheet = rows.map((cells,r)=>{
-    if(cells.length > wide) wide = cells.length;
-    const cs = cells.map((v,c)=>{
-      const ref = colName(c)+(r+1);
-      if(typeof v === "number" && isFinite(v)){ cellCount++; return `<c r="${ref}"><v>${v}</v></c>`; }
-      const s = String(v==null?"":v);
-      if(!s) return `<c r="${ref}"/>`;
-      cellCount++;
-      return `<c r="${ref}" t="s"><v>${strIdx(s)}</v></c>`;
-    }).join("");
-    return `<row r="${r+1}" spans="1:${cells.length||1}">${cs}</row>`;
-  }).join("");
-  const dim = "A1:" + colName(Math.max(0, wide-1)) + Math.max(1, rows.length);
-  const stamp = new Date().toISOString().replace(/\.\d+Z$/,"Z");
-
-  return zipStore([
-    {name:"[Content_Types].xml", text:P+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">`+
-      `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>`+
-      `<Default Extension="xml" ContentType="application/xml"/>`+
-      `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`+
-      `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`+
-      `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>`+
-      `<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>`+
-      `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`+
-      `<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`},
-
-    {name:"_rels/.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
-      `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/>`+
-      `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>`+
-      `<Relationship Id="rId3" Type="${REL}/extended-properties" Target="docProps/app.xml"/></Relationships>`},
-
-    {name:"docProps/core.xml", text:P+`<cp:coreProperties `+
-      `xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" `+
-      `xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" `+
-      `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">`+
-      `<dc:title>${xmlEsc(sheetName)}</dc:title><dc:creator>Parts Bin</dc:creator>`+
-      `<cp:lastModifiedBy>Parts Bin</cp:lastModifiedBy>`+
-      `<dcterms:created xsi:type="dcterms:W3CDTF">${stamp}</dcterms:created>`+
-      `<dcterms:modified xsi:type="dcterms:W3CDTF">${stamp}</dcterms:modified></cp:coreProperties>`},
-
-    {name:"docProps/app.xml", text:P+`<Properties `+
-      `xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" `+
-      `xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">`+
-      `<Application>Parts Bin</Application></Properties>`},
-
-    {name:"xl/workbook.xml", text:P+`<workbook xmlns="${NS}" xmlns:r="${REL}">`+
-      `<workbookPr/><bookViews><workbookView xWindow="0" yWindow="0" windowWidth="16384" windowHeight="8192"/></bookViews>`+
-      `<sheets><sheet name="${xmlEsc(sheetName).slice(0,31)}" sheetId="1" r:id="rId1"/></sheets></workbook>`},
-
-    {name:"xl/_rels/workbook.xml.rels", text:P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
-      `<Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/>`+
-      `<Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/>`+
-      `<Relationship Id="rId3" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/></Relationships>`},
-
-    /* the smallest stylesheet Excel calls valid: the first two fills and the
-       one cellXfs entry are required even when nothing is styled           */
-    {name:"xl/styles.xml", text:P+`<styleSheet xmlns="${NS}">`+
-      `<fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts>`+
-      `<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>`+
-      `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>`+
-      `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>`+
-      `<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>`+
-      `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>`+
-      `</styleSheet>`},
-
-    {name:"xl/sharedStrings.xml", text:P+`<sst xmlns="${NS}" count="${cellCount}" uniqueCount="${strings.length}">`+
-      strings.map(s=>`<si><t xml:space="preserve">${xmlEsc(s)}</t></si>`).join("")+`</sst>`},
-
-    {name:"xl/worksheets/sheet1.xml", text:P+`<worksheet xmlns="${NS}" xmlns:r="${REL}">`+
-      `<dimension ref="${dim}"/>`+
-      `<sheetViews><sheetView tabSelected="1" workbookViewId="0"/></sheetViews>`+
-      `<sheetFormatPr defaultRowHeight="15"/>`+
-      `<sheetData>${sheet}</sheetData></worksheet>`}
-  ]);
-}
-function toCsv(){
-  const cols = ["cat","mfr","lcsc","mpn","val","pkg","qty","min","box","desc","src","ds","img"];
-  const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
-  return [cols.join(",")].concat(db.parts.map(p=>cols.map(c=>q(p[c])).join(","))).join("\r\n");
-}
-
-/* ------------------------------------------------------------------ wiring */
-document.addEventListener("click", async ev=>{
-  const t = ev.target;
-
-  /* ---- updates */
-  if(t.id==="updReload"){ location.reload(); return; }
-  if(t.id==="updLater"){ const o = updOffer(); if(o){ upd.dismissed = o.v; updSave(); } updShow(); return; }
-  if(t.id==="updNow"){ t.disabled = true; upd.at = 0; upd.pageAt = 0; await updCheck(true); await updCheckPage(true);
-    t.disabled = false; render(); if(!updOffer()) toast("This is the newest version ("+APP_VERSION+")"); return; }
-
-  /* ---- scanning */
-  if(t.closest("#scanBtn")){ if(db) openScan(); return; }
-  if(t.id==="scanCam"){ scanCamStart(); return; }
-  if(t.id==="scanClose"){ closeEditor(); return; }
-  if(t.id==="scanIn" || t.id==="scanOutBtn"){ scanMove(t.dataset.pid, t.id==="scanIn" ? 1 : -1); return; }
-  if(t.id==="scanOpen"){ const p = findPart(t.dataset.pid); scanStop(); if(p) openEditor(p); return; }
-  if(t.id==="scanAdd"){
-    let s = {}; try{ s = JSON.parse($("#scanOut").dataset.scan||"{}"); }catch(e){}
-    scanStop(); openEditor(null, {lcsc:s.lcsc||"", mpn:s.mpn||"", qty:s.qty||0, src:"LCSC"});
-    return;
-  }
-
-  /* the dashed drawer at the end of the wall is not a filter - it is an empty
-     box waiting to be started, so it opens the form with its number already in */
-  const nb = t.closest("[data-newbox]");
-  if(nb){ openEditor(null, {box:nb.dataset.newbox}); return; }
-
-  const drawer = t.closest("[data-box]");
-  if(drawer){ ui.box = ui.box===drawer.dataset.box ? "" : drawer.dataset.box;
-              if(ui.view!=="parts") ui.view="parts";
-              render(); return; }
-
-  const cat = t.closest("[data-cat]");
-  if(cat){ ui.cat = ui.cat===cat.dataset.cat ? "" : cat.dataset.cat; render(); return; }
-
-  const view = t.closest("#views button");
-  if(view){ ui.view = view.dataset.view; render(); return; }
-
-  const cl = t.closest("[data-clear]");
-  if(cl){ const k = cl.dataset.clear; ui[k] = (k==="low") ? false : ""; render(); return; }
-
-  if(t.id==="clearFilters"){ ui.cat=""; ui.box=""; ui.low=false; ui.mfr=""; render(); return; }
-
-  const act = t.closest("[data-act]");
-  if(act){
-    const p = findPart(act.closest(".row").dataset.id);
-    if(!p) return;
-    if(act.dataset.act==="dec") bump(p,-1);
-    else if(act.dataset.act==="inc") bump(p,1);
-    else openEditor(p);
-    return;
-  }
-
-  const mtag = t.closest("[data-mfr]");
-  if(mtag){
-    ui.mfr = ui.mfr===mtag.dataset.mfr ? "" : mtag.dataset.mfr;
-    if(ui.view!=="parts") ui.view="parts";
-    render(); return;
-  }
-
-  const row = t.closest(".row");
-  if(row){ const p = findPart(row.dataset.id); if(p){ openEditor(p); return; } }
-
-  const goto_ = t.closest("[data-view-go]");
-  if(goto_){ ui.view = goto_.dataset.viewGo; render(); return; }
-
-  if(t.id==="bomRun"){
-    ui.bomText = $("#bomText").value;
-    ui.bomQty  = Math.max(1, Number($("#bomQty").value)||1);
-    runBom(); ui.order = null; render();
-    return;
-  }
-  if(t.id==="bomClear"){ ui.bomText=""; ui.bomRows=null; render(); return; }
-
-  if(t.id==="bomFillMpn"){ t.disabled = true; await bomFillMpn(); return; }
-  if(t.id==="bomFillHalt"){ bomFillStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
-  if(/^bomCsv(Jlcpcb|Pcbway|Nextpcb|Pcbgogo)$/.test(t.id||"")){
-    const rows = ui.bomRows || [];
-    if(!rows.length) return toast("Check a BOM against the bin first");
-    const vendor = t.id.replace("bomCsv","").toLowerCase();
-    const name = (ui.bomName||"bom").trim().replace(/[^\w.-]+/g,"-").replace(/^-|-$/g,"") || "bom";
-    download(name+"-"+vendor+".xlsx", bomXlsx(vendor));
-    const noPn = rows.filter(r=>!bomOut(r).mpn).length;
-    toast(noPn ? rows.length+" lines exported — "+noPn+" still carry no part number"
-               : rows.length+" lines exported");
-    return;
-  }
-
-  if(t.id==="bomSave"){
-    const name = ($("#bomName").value||"").trim();
-    const text = $("#bomText").value;
-    if(!name) return toast("Give the board a name first");
-    if(!text.trim()) return toast("Paste the BOM first");
-    db.boms = db.boms || [];
-    const at = db.boms.findIndex(b=>b.name.toLowerCase()===name.toLowerCase());
-    const rec = {id: at>=0?db.boms[at].id:Date.now(), name, text,
-                 boards: Math.max(1,Number($("#bomQty").value)||1),
-                 reserve: at>=0?Number(db.boms[at].reserve||0):0,
-                 updated: new Date().toISOString()};
-    if(at>=0) db.boms[at] = rec; else db.boms.push(rec);
-    ui.bomName = name; ui.bomText = text;
-    save(); render();
-    toast(at>=0 ? "Updated "+name : "Saved "+name);
-    return;
-  }
-  const brs = t.closest("[data-bomres]"), brl = t.closest("[data-bomrel]");
-  if(brs || brl){
-    const b = (db.boms||[]).find(x=>x.id===Number((brs||brl).dataset[brs?"bomres":"bomrel"]));
-    if(!b) return;
-    const was = Number(b.reserve||0);
-    if(brs){
-      const n = Number(prompt("Hold the parts for how many boards of "+b.name+"?", String(b.boards||1)));
-      if(!(n>0)) return;
-      b.reserve = Math.floor(n);
-    } else b.reserve = 0;
-    rematchBom(); save(); render();
-    toast(brs ? "Holding parts for "+b.reserve+" × "+b.name : "Released "+b.name, "Undo", ()=>{ b.reserve = was; rematchBom(); save(); render(); });
-    return;
-  }
-  const bl = t.closest("[data-bomload]");
-  if(bl){
-    const b = (db.boms||[]).find(x=>x.id===Number(bl.dataset.bomload));
-    if(!b) return;
-    ui.bomText = b.text; ui.bomName = b.name; ui.bomQty = b.boards||1;
-    if(bl.dataset.bomgo){ closeEditor(); ui.view = "bom"; }    /* from a part's "Used in" */
-    runBom(); ui.order = null; render();
-    return;
-  }
-  const bd = t.closest("[data-bomdel]");
-  if(bd){
-    const id = Number(bd.dataset.bomdel);
-    const b = (db.boms||[]).find(x=>x.id===id);
-    /* same reasoning as the delete in the part editor: one stray click and a
-       pasted BOM nobody kept a copy of is gone                             */
-    if(b && !confirm("Delete the board "+b.name+" and its "+
-                     bomCapacity(b.text).lines+" lines?")) return;
-    const at = (db.boms||[]).indexOf(b);
-    db.boms = (db.boms||[]).filter(x=>x.id!==id);
-    save(); render();
-    toast("Deleted "+(b?b.name:"board"), "Undo", ()=>{
-      db.boms.splice(Math.min(at,db.boms.length),0,b); save(); render();
-    });
-    return;
-  }
-
-  if(t.id==="pickPrint"){
-    /* everything else on this tab is working material - the walk is the only
-       part worth carrying to the shelf                                     */
-    document.body.classList.add("pickonly");
-    window.print();
-    document.body.classList.remove("pickonly");
-    return;
-  }
-  if(t.id==="pickTake"){
-    const rows = pickRows().filter(r=>r.part && r.take>0 && ui.picked[pickKey(r)]);
-    if(!rows.length) return;
-    const pieces = rows.reduce((s,r)=>s+r.take,0);
-    const drawers = new Set(rows.filter(r=>r.box).map(r=>r.box)).size;
-    if(!confirm("Take "+pieces+" pieces off the shelf, from "+drawers+" drawer"+(drawers===1?"":"s")+"?\n\n"+
-                "This deducts them from the bin.")) return;
-    /* one movement per part, not per drawer: the log is about stock, and a
-       part taken from two drawers left the shelf once                     */
-    const byPart = new Map();
-    rows.forEach(r=>{
-      const e = byPart.get(r.part) || {take:0, boxes:{}};
-      e.take += r.take;
-      if(r.box) e.boxes[r.box] = (e.boxes[r.box]||0) + r.take;
-      byPart.set(r.part, e);
-    });
-    const undo = [];
-    byPart.forEach((e, p)=>{
-      const was = Number(p.qty||0), wasBox = p.box;
-      undo.push({p, was, wasBox});
-      p.qty = Math.max(0, was - e.take);
-      p.box = boxAfterPick(p, e.boxes);
-      logAdd({k:"qty", id:p.id, mpn:p.mpn, lcsc:p.lcsc, cat:p.cat,
-              d:p.qty-was, a:was, b:p.qty});
-    });
-    ui.picked = {};   /* those drawers have been dealt with */
-    /* the board just built no longer needs its parts held */
-    const ob = (db.boms||[]).find(b=>b.id===openBomId());
-    const resWas = ob ? Number(ob.reserve||0) : 0;
-    if(ob && resWas) ob.reserve = Math.max(0, resWas - Math.max(1, Number(ui.bomQty)||1));
-    rematchBom();
-    save(); render();
-    toast("Took "+pieces+" off the shelf, "+byPart.size+" part"+(byPart.size===1?"":"s")+
-          (ob && resWas ? " · "+ob.name+" now holds "+ob.reserve : ""), "Undo", ()=>{
-      undo.forEach(u=>{ u.p.qty = u.was; u.p.box = u.wasBox; });
-      if(ob) ob.reserve = resWas;
-      rematchBom(); save(); render();
-    });
-    return;
-  }
-  if(t.id==="rcvCheck"){
-    ui.rcvText = $("#rcvText").value;
-    ui.receive = parseBom(ui.rcvText).map(r=>{
-      const m = matchBom(r);
-      return {lcsc:r.lcsc||"", mpn:r.mpn||r.val||"", qty:r.need||0, part:m.p};
-    }).filter(r=>r.qty>0 && (r.lcsc||r.mpn));
-    render();
-    return;
-  }
-  if(t.id==="rcvCancel"){ ui.receive=null; render(); return; }
-  if(t.id==="rcvApply"){
-    const list = ui.receive||[];
-    if(!list.length) return;
-    const undo = [];
-    list.forEach(r=>{
-      if(r.part){
-        undo.push({p:r.part, was:Number(r.part.qty||0)});
-        r.part.qty = Number(r.part.qty||0) + r.qty;
-        logAdd({k:"qty", id:r.part.id, mpn:r.part.mpn, lcsc:r.part.lcsc, cat:r.part.cat,
-                d:r.qty, a:undo[undo.length-1].was, b:r.part.qty});
-      } else {
-        const rec = {id: 1+db.parts.reduce((m,p)=>Math.max(m,p.id),0),
-                     cat: db.categories[0]||"Uncategorised", lcsc:r.lcsc.toUpperCase(), mpn:r.mpn,
-                     val:"", pkg:"", mfr:"", qty:r.qty, min:null, box:"", desc:"", src:"order"};
-        if(!db.categories.includes(rec.cat)) db.categories.push(rec.cat);
-        db.parts.push(rec);
-        undo.push({p:rec, isNew:true});
-        logAdd({k:"add", id:rec.id, mpn:rec.mpn, lcsc:rec.lcsc, cat:rec.cat, b:rec.qty});
-      }
-    });
-    const added = list.filter(r=>!r.part).length;
-    ui.receive = null; ui.rcvText = ""; ui.order = null;
-    save(); render();
-    toast("Booked in "+list.length+" lines"+(added?", "+added+" new \u2014 give them a box":""), "Undo", ()=>{
-      undo.forEach(u=>{ if(u.isNew) db.parts = db.parts.filter(x=>x!==u.p); else u.p.qty = u.was; });
-      save(); render();
-    });
-    return;
-  }
-  if(t.id==="bomToOrder"){ ui.order = buildOrder(); ui.view="order"; render(); return; }
-
-  if(t.id==="orderMark"){ pendingAdd(); return; }
-  const ptk = t.closest("[data-pendtake]");
-  if(ptk){ pendingReceive(Number(ptk.dataset.pendtake)); return; }
-  const pcx = t.closest("[data-pendcancel]");
-  if(pcx){
-    const o = (db.pending||[]).find(x=>x.id===Number(pcx.dataset.pendcancel));
-    if(!o) return;
-    if(!confirm("Cancel the order of "+o.at+"?" + String.fromCharCode(10,10) + "Its "+o.lines.length+" lines go back to the shopping list.")) return;
-    db.pending = db.pending.filter(x=>x!==o);
-    ui.order = null; save(); render();
-    toast("Order cancelled", "Undo", ()=>{ db.pending.push(o); save(); render(); });
-    return;
-  }
-  const pdr = t.closest("[data-penddrop]");
-  if(pdr){
-    const [oid,ix] = pdr.dataset.penddrop.split(":");
-    const o = (db.pending||[]).find(x=>x.id===Number(oid));
-    if(!o) return;
-    const gone = o.lines.splice(Number(ix),1)[0];
-    if(!o.lines.length) db.pending = db.pending.filter(x=>x!==o);
-    save(); render();
-    toast("Dropped "+(gone.mpn||gone.lcsc||"the line"), "Undo", ()=>{
-      if(!db.pending.includes(o)) db.pending.push(o);
-      o.lines.splice(Number(ix),0,gone); save(); render();
-    });
-    return;
-  }
-  const orst = t.closest("[data-ordreset]");
-  if(orst){
-    const i = Number(orst.dataset.ordreset);
-    const r = (ui.order||[])[i];
-    if(r){ r.qty = r.sug; const box = document.querySelector('.ordqty[data-i="'+i+'"]');
-           if(box) box.value = r.qty; orderSync(i); }
-    return;
-  }
-  if(t.id==="orderRefresh"){ ui.order = buildOrder(); render(); toast("Rebuilt"); return; }
-  if(t.id==="orderCsv"){
-    const rows = (ui.order || buildOrder()).filter(r=>Number(r.qty||0)>0);
-    const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
-    download("order.csv", "\uFEFF" + ["lcsc,mpn,category,quantity,why"]
-      .concat(rows.map(r=>[r.lcsc,r.mpn,r.cat,r.qty,r.why].map(q).join(","))).join("\r\n"), "text/csv");
-    return;
-  }
-  if(t.id==="orderLcsc"){
-    const rows = (ui.order || buildOrder()).filter(r=>r.lcsc && Number(r.qty||0)>0);
-    const text = rows.map(r=>r.lcsc+","+r.qty).join("\n");
-    if(!text) return toast("No line carries an LCSC code");
-    try{
-      await navigator.clipboard.writeText(text);
-      toast("Copied "+rows.length+" lines — paste into the LCSC bulk order box");
-    }catch(e){
-      download("lcsc-order.txt", text, "text/plain");
-      toast("Clipboard refused here, downloaded the list instead");
-    }
-    return;
-  }
-
-  if(t.id==="doPrint"){ window.print(); return; }
-
-  const mg = t.closest("[data-merge]");
-  if(mg){
-    const ids = mg.dataset.merge.split(",").map(Number);
-    const list = ids.map(findPart).filter(Boolean);
-    if(list.length<2) return;
-    const snapshot = list.map(p=>({p, copy:JSON.parse(JSON.stringify(p))}));
-    const keep = list[0];
-    /* boxes become an explicit split so no quantity is invented or lost */
-    const boxes = [];
-    list.forEach(p=>{
-      partBoxes(p).forEach(tk=>{
-        const q = qtyInBox(p, tk.key)||0;
-        const e = boxes.find(b=>b.key===tk.key);
-        if(e) e.q += q; else boxes.push({key:tk.key, q:q});
-      });
-    });
-    keep.qty = list.reduce((s,p)=>s+Number(p.qty||0),0);
-    keep.box = boxes.map(b=> boxes.length>1 ? b.key+":"+Math.round(b.q) : b.key).join(" + ");
-    list.slice(1).forEach(p=>{
-      if(!keep.lcsc && p.lcsc) keep.lcsc = p.lcsc;
-      if(!keep.mfr  && p.mfr)  keep.mfr  = p.mfr;
-      if(!keep.src  && p.src)  keep.src  = p.src;
-      if(!keep.desc && p.desc) keep.desc = p.desc;
-    });
-    const gone = list.slice(1).map(p=>({p, at:db.parts.indexOf(p)}));
-    db.parts = db.parts.filter(p=>ids.indexOf(p.id)<1 || p.id===keep.id);
-    logAdd({k:"edit", id:keep.id, mpn:keep.mpn, lcsc:keep.lcsc, cat:keep.cat,
-            b:keep.qty, d:0});
-    save(); render();
-    toast("Merged into one row of "+num(keep.qty)+" — boxes "+keep.box, "Undo", ()=>{
-      snapshot.forEach(sn=>Object.assign(sn.p, sn.copy));
-      gone.sort((a,b)=>a.at-b.at).forEach(g=>db.parts.splice(Math.min(g.at, db.parts.length),0,g.p));
-      save(); render();
-    });
-    return;
-  }
-
-  if(t.id==="lowChip"){ ui.low=!ui.low; render(); return; }
-  const nq = t.closest("[data-noq]");
-  if(nq || t.id==="showNoVal"){
-    const want = nq ? nq.dataset.noq : "no:value";
-    ui.q = (ui.q.trim().toLowerCase()===want) ? "" : want;
-    ui.cat=""; ui.box=""; ui.mfr=""; ui.low=false;
-    ui.view = "parts"; render();
-    const box = $("#q"); if(box) box.value = ui.q;
-    return;
-  }
-  if(t.id==="clearChip"){ ui.low=false; ui.box=""; ui.cat=""; ui.mfr=""; ui.q=""; $("#q").value=""; render(); return; }
-  if(t.id==="addBtn" || t.id==="addBtn2"){ openEditor(null); return; }
-
-  /* Only offered from the first-run screen, which only appears when the bin
-     is empty - so this can never land on top of anyone's real inventory.  */
-  if(t.id==="loadExample"){
-    t.disabled = true;
-    try{
-      const r = await fetch("example-components.json", {cache:"no-store"});
-      if(!r.ok) throw new Error("HTTP "+r.status);
-      const next = JSON.parse(await r.text());
-      if(!next || !Array.isArray(next.parts) || !next.parts.length) throw new Error("no parts in it");
-      db = normalize(next);
-      save(); render();
-      toast(db.parts.length+" example parts loaded — this browser only");
-    }catch(e){
-      t.disabled = false;
-      toast("Could not load the example: "+e.message);
-    }
-    return;
-  }
-
-  if(t.id==="catAdd"){
-    const v = ($("#newCatField").value||"").trim();
-    if(!v) return toast("Type a name first");
-    if(db.categories.includes(v)) return toast("That category already exists");
-    db.categories.push(v); save(); render(); toast("Added "+v);
-    return;
-  }
-  const ren = t.closest("[data-catren]");
-  if(ren){ ui.editCat = ren.dataset.catren; render(); const i=$("#catRenameField"); if(i){i.focus();i.select();} return; }
-  if(t.id==="catCancel"){ ui.editCat=null; ui.moveCat=null; render(); return; }
-
-  const mask = t.closest("[data-catmoveask]");
-  if(mask){ ui.moveCat = mask.dataset.catmoveask; ui.editCat=null; render(); return; }
-
-  const mv = t.closest("[data-catmove]");
-  if(mv){
-    const from = mv.dataset.catmove, to = $("#moveTarget").value;
-    const moved = db.parts.filter(p=>p.cat===from);
-    moved.forEach(p=>p.cat=to);
-    ui.moveCat=null; save(); render();
-    toast(moved.length+" parts moved to "+to, "Undo", ()=>{
-      moved.forEach(p=>p.cat=from); save(); render();
-    });
-    return;
-  }
-  const csave = t.closest("[data-catsave]");
-  if(csave){
-    const from = csave.dataset.catsave, to = ($("#catRenameField").value||"").trim();
-    if(!to) return toast("The name cannot be empty");
-    if(to!==from && db.categories.includes(to)) return toast("That category already exists");
-    db.categories = db.categories.map(c=>c===from?to:c);
-    db.parts.forEach(p=>{ if(p.cat===from) p.cat=to; });
-    if(db.catMin && db.catMin[from]!=null && to!==from){ db.catMin[to] = db.catMin[from]; delete db.catMin[from]; }
-    if(ui.cat===from) ui.cat = to;
-    ui.editCat=null; save(); render(); toast("Renamed to "+to);
-    return;
-  }
-  const cdel = t.closest("[data-catdel]");
-  if(cdel){
-    const c = cdel.dataset.catdel;
-    if(db.parts.some(p=>p.cat===c)) return toast("Move its parts out first");
-    const at = db.categories.indexOf(c);
-    db.categories = db.categories.filter(x=>x!==c);
-    if(ui.cat===c) ui.cat="";
-    save(); render();
-    toast("Deleted the category "+c, "Undo", ()=>{
-      db.categories.splice(Math.min(at, db.categories.length), 0, c); save(); render();
-    });
-    return;
-  }
-  if(t.id==="overlay"){ closeEditor(); return; }
-
-  if(t.id==="exportJson"){ download("components.json", JSON.stringify(db,null,1), "application/json"); return; }
-  if(t.id==="exportCsv"){ download("components.csv", "\uFEFF"+toCsv(), "text/csv"); return; }
-  if(t.id==="importBtn"){ $("#importInput").click(); return; }
-  if(t.id==="reconnect"){
-    try{
-      const perm = await pendingHandle.requestPermission({mode:"readwrite"});
-      if(perm!=="granted") return toast("Permission refused");
-      fileHandle = pendingHandle; pendingHandle = null; reconnectArmed = false;
-      await adoptFile(); chip(); render(); toast("Writing to "+fileHandle.name+" again");
-    }catch(e){ toast("Could not reconnect: "+e.message); }
-    return;
-  }
-  if(t.id==="bulkMfr"){
-    const list = filtered();
-    const cur  = [...new Set(list.map(p=>p.mfr).filter(Boolean))];
-    const name = prompt("Manufacturer for these "+list.length+" parts:\n\n"+
-                        "(empty clears it)"+(cur.length?"\n\nalready set: "+cur.join(", "):""),
-                        cur.length===1?cur[0]:"");
-    if(name===null) return;
-    const before = list.map(p=>({p, was:p.mfr||""}));
-    list.forEach(p=>p.mfr = name.trim());
-    logAdd({k:"edit", mpn:"("+list.length+" parts)", cat:name.trim()||"cleared manufacturer"});
-    save(); render();
-    toast((name.trim()?"Set "+name.trim()+" on ":"Cleared the manufacturer on ")+list.length+" parts", "Undo",
-      ()=>{ before.forEach(b=>b.p.mfr=b.was); save(); render(); });
-    return;
-  }
-
-  if(t.id==="valScan"){
-    const hits = guessValueList();
-    $("#valWork").innerHTML = hits.length
-      ? `<table style="margin-top:12px"><thead><tr><th>Category</th><th>Part</th>
-          <th>Would read</th><th>From the description</th></tr></thead><tbody>
-          ${hits.slice(0,60).map(h=>`<tr><td>${esc(h.p.cat)}</td><td class="m">${esc(h.p.mpn||h.p.lcsc)}</td>
-            <td class="m" style="color:var(--kapton);font-weight:600">${esc(h.val)}</td>
-            <td style="font-size:11.5px;color:var(--ink3)">${esc((h.p.desc||"").slice(0,60))}</td></tr>`).join("")}
-          ${hits.length>60?`<tr><td colspan="4" style="color:var(--ink3)">\u2026and ${hits.length-60} more</td></tr>`:""}
-         </tbody></table>
-         <div class="sheetbar"><button class="btn" id="valApply">Fill in ${hits.length} values</button>
-           <button class="btn ghost" id="valCancel">Cancel</button></div>`
-      : `<p style="margin-top:12px">Nothing readable left \u2014 every passive that states its value already has one.</p>`;
-    return;
-  }
-  if(t.id==="valApply"){
-    const hits = guessValueList();
-    const before = hits.map(h=>({p:h.p, was:h.p.val||""}));
-    hits.forEach(h=>h.p.val = h.val);
-    logAdd({k:"edit", mpn:"("+hits.length+" parts)", cat:"value read from description"});
-    save(); render();
-    toast("Filled "+hits.length+" values", "Undo", ()=>{
-      before.forEach(b=>b.p.val=b.was); save(); render();
-    });
-    return;
-  }
-  if(t.id==="valCancel"){ $("#valWork").innerHTML=""; return; }
-
-  if(t.id==="mfrSuggest"){
-    const hits = suggestMfr();
-    $("#mfrWork").innerHTML = hits.length
-      ? `<table style="margin-top:12px"><thead><tr><th>Part</th><th>Would be set to</th></tr></thead><tbody>
-          ${hits.slice(0,60).map(h=>`<tr><td class="m">${esc(h.p.mpn)}</td><td>${esc(h.name)}</td></tr>`).join("")}
-          ${hits.length>60?`<tr><td colspan="2" style="color:var(--ink3)">…and ${hits.length-60} more</td></tr>`:""}
-         </tbody></table>
-         <div class="sheetbar"><button class="btn" id="mfrApply">Apply to ${hits.length} parts</button>
-         <button class="btn ghost" id="mfrCancel">Cancel</button></div>
-         <p style="color:var(--ink3);font-size:12px">Only part numbers whose maker is unmistakable are listed.
-         Everything else stays empty on purpose — a wrong manufacturer on a BOM line costs more than a blank one.</p>`
-      : `<p style="margin-top:12px">Nothing left to suggest — every recognisable part number already has one.</p>`;
-    return;
-  }
-  if(t.id==="mfrApply"){
-    const hits = suggestMfr();
-    const before = hits.map(h=>({p:h.p, was:h.p.mfr||""}));
-    hits.forEach(h=>h.p.mfr=h.name);
-    logAdd({k:"edit", mpn:"("+hits.length+" parts)", cat:"manufacturer from part number"});
-    save(); render();
-    toast("Filled "+hits.length+" manufacturers", "Undo",
-      ()=>{ before.forEach(b=>b.p.mfr=b.was); save(); render(); });
-    return;
-  }
-  if(t.id==="mfrCancel"){ $("#mfrWork").innerHTML=""; return; }
-
-  if(t.id==="mfrRename"){
-    const names = mfrList().map(m=>m.name);
-    $("#mfrWork").innerHTML = `<div class="sheetbar" style="margin-top:12px">
-      <select class="sel" id="mfrFrom">${names.map(n=>`<option>${esc(n)}</option>`).join("")}</select>
-      <span class="lab">becomes</span>
-      <input id="mfrTo" placeholder="new name" list="mfrList"
-             style="border:1px solid var(--rule);background:var(--paper);padding:7px 9px;font-family:var(--mono);font-size:13px;border-radius:2px;flex:1;max-width:240px">
-      <datalist id="mfrList">${names.map(n=>`<option value="${esc(n)}">`).join("")}</datalist>
-      <button class="btn" id="mfrDoRename">Apply</button>
-      <button class="btn ghost" id="mfrCancel">Cancel</button></div>
-      <p style="color:var(--ink3);font-size:12px">Typing a name that already exists merges the two.</p>`;
-    return;
-  }
-  if(t.id==="mfrDoRename"){
-    const from = $("#mfrFrom").value, to = ($("#mfrTo").value||"").trim();
-    if(!to) return toast("Type the new name");
-    const hit = db.parts.filter(p=>(p.mfr||"")===from);
-    hit.forEach(p=>p.mfr=to);
-    if(ui.mfr===from) ui.mfr=to;
-    save(); render();
-    toast(hit.length+" parts moved to "+to, "Undo", ()=>{ hit.forEach(p=>p.mfr=from); save(); render(); });
-    return;
-  }
-
-  if(t.id==="devSave"){
-    devSave(($("#devName").value||"").trim());
-    render(); toast("This computer is now "+device);
-    return;
-  }
-  /* moving a category up or down the list it is kept in */
-  const cUp = t.closest("[data-catup]"), cDn = t.closest("[data-catdn]");
-  if(cUp || cDn){
-    const name = (cUp||cDn).dataset[cUp?"catup":"catdn"];
-    const a = db.categories, i = a.indexOf(name), j = i + (cUp?-1:1);
-    if(i<0 || j<0 || j>=a.length) return;
-    a[i] = a[j]; a[j] = name;
-    save(); render();
-    return;
-  }
-  if(t.id==="catSortAz" || t.id==="catSortUse"){
-    const was = db.categories.slice();
-    if(t.id==="catSortAz") db.categories.sort((x,y)=>x.localeCompare(y));
-    else {
-      const n = c => db.parts.filter(p=>p.cat===c).length;
-      db.categories.sort((x,y)=> n(y)-n(x) || x.localeCompare(y));
-    }
-    save(); render();
-    toast(t.id==="catSortAz"?"Categories sorted A to Z":"Fullest categories first", "Undo",
-      ()=>{ db.categories = was; save(); render(); });
-    return;
-  }
-
-  if(t.id==="lcscBulkScan"){ t.disabled = true; await lcscBulkRead(); return; }
-  if(t.id==="imgBulkGo"){ t.disabled = true; await imgBulkRun(); return; }
-  if(t.id==="imgBulkHalt"){ imgBulkStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
-  if(t.id==="imgPushGo"){ t.disabled = true;
-    try{ toast("Pushed "+(await imgPush())+" pictures to "+gh.repo); }
-    catch(e){ toast("Push failed: "+e.message); }
-    render(); return; }
-  if(t.id==="lcscBulkHalt"){ lcscBulkStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
-  if(t.id==="lcscBulkApply"){ lcscBulkApply(); return; }
-  if(t.id==="lcscBulkCancel"){ ui.lcscBulk = null; $("#lcscBulkWork").innerHTML = ""; render(); return; }
-
-  if(t.id==="lcscTest"){
-    const out = $("#lcscTestOut");
-    out.innerHTML = "Asking for C1779…";
-    t.disabled = true;
-    try{
-      const r = await lcscFetch("C1779");
-      const m = lcscMap(r);
-      out.innerHTML = `<b>It works — answered by ${esc(lcscVia)}.</b> C1779 came back as ${esc(m.mpn)}, ${esc(m.mfr)}, ${esc(m.pkg)}` +
-                      (m.val?`, value ${esc(m.val)}`:"") + (m.cat?`, filed under ${esc(m.cat)}`:", no matching category here") + ".";
-    }catch(e){
-      out.innerHTML = `<span class="bad">${esc(e.message)}.</span> Nothing was reached. ` +
-        (lcsc.relay ? "Check the address above — open it in a tab and see what it answers."
-                    : "Set a relay of your own above; the public ones are not answering.");
-    } finally { t.disabled = false; }
-    return;
-  }
-  const ct = t.closest("[data-conftake]");
-  if(ct || t.id==="confTakeAll"){
-    const list = ui.conflicts || [];
-    const pick = ct ? [list[Number(ct.dataset.conftake)]] : list.slice();
-    pick.forEach(x=>{ const p = x && findPart(x.id); if(p) p[x.k] = x.theirs; });
-    ui.conflicts = list.filter(x=>pick.indexOf(x)<0);
-    if(!ui.conflicts.length) ui.conflicts = null;
-    save(); render(); toast(pick.length+" field"+(pick.length>1?"s":"")+" set to GitHub's value");
-    return;
-  }
-  if(t.id==="confKeep"){ ui.conflicts = null; render(); return; }
-  if(t.id==="lcscFindScan"){ lcscFindBulk(); return; }
-  if(t.id==="lcscFindHalt"){ lcscFindStop = true; return; }
-  if(t.id==="lcscFindApply"){ lcscFindApply(); return; }
-  if(t.id==="lcscFindCancel"){ ui.findBulk = null; render(); return; }
-  if(t.id==="catMinSuggest"){
-    db.catMin = db.catMin || {};
-    const was = Object.assign({}, db.catMin);
-    const set = db.categories.filter(c=>db.catMin[c]==null);
-    set.forEach(c=>{ db.catMin[c] = suggestCatMin(c); });
-    if(!set.length) return toast("Every category already has a level");
-    save(); render();
-    toast("Set levels on "+set.length+" categories · "+db.parts.filter(isLow).length+" parts now low", "Undo", ()=>{ db.catMin = was; save(); render(); });
-    return;
-  }
-  if(t.id==="ghPull" || t.id==="ghPullNow"){ await ghPull(); return; }
-  if(t.id==="ghPush"){ await ghPush(); return; }
-  if(t.id==="ghForce"){ await ghPush(false, true); return; }
-
-  if(t.id==="saveNow"){ clearTimeout(saveTimer); await fileWrite(); toast(fileHandle?"Saved":"No data file connected"); return; }
-  if(t.id==="forgetFile"){ fileHandle=null; pendingHandle=null; await idbSet("fileHandle",null); chip(); render(); return; }
-
-  if(t.id==="clearLog"){ if(confirm("Clear the movement log?")){ db.log=[]; save(); render(); } return; }
-
-  if(t.id==="connect"){
-    try{
-      fileHandle = await window.showSaveFilePicker({suggestedName:"components.json",
-        types:[{description:"Inventory data",accept:{"application/json":[".json"]}}]});
-      pendingHandle = null;
-      await idbSet("fileHandle", fileHandle);
-      await fileWrite(); chip(); render();
-      toast("Every change now goes straight into "+fileHandle.name);
-    }catch(e){ if(e.name!=="AbortError") toast("Could not open the picker here: "+e.message); }
-    return;
-  }
-  if(t.id==="openfile"){
-    try{
-      const [h] = await window.showOpenFilePicker({types:[{description:"Inventory data",accept:{"application/json":[".json"]}}]});
-      const text = await (await h.getFile()).text();
-      const next = JSON.parse(text);
-      if(!next || !Array.isArray(next.parts)) throw new Error("no parts array in that file");
-      db = normalize(next); fileHandle = h; pendingHandle = null;
-      await idbSet("fileHandle", h);
-      save(); render(); toast("Loaded "+h.name);
-    }catch(e){ if(e.name!=="AbortError") toast("Could not load: "+e.message); }
-    return;
-  }
-});
-
-/* ------------------------------------------- dragging a category about ---
-   The arrows are exact and reachable from a keyboard; a drag is quicker when
-   a shelf has to travel past a dozen others. Both write the same list, and
-   the two sort buttons handle the coarse arrangement, which is what a long
-   list actually needs - nobody drags the fiftieth row to the top.          */
-let catDrag = null;
-const catDropMarks = ()=> $$("tr[data-catrow]").forEach(x=>
-  x.classList.remove("dragging","dropabove","dropbelow"));
-
-/* where the row would land: above the one under the cursor, or below it */
-function catDropAt(ev){
-  const row = ev.target.closest && ev.target.closest("tr[data-catrow]");
-  if(!row || row.dataset.catrow===catDrag) return null;
-  const r = row.getBoundingClientRect();
-  return {row, below: ev.clientY > r.top + r.height/2};
-}
-
-document.addEventListener("dragstart", ev=>{
-  const row = ev.target.closest && ev.target.closest("tr[data-catrow]");
-  if(!row) return;
-  catDrag = row.dataset.catrow;
-  row.classList.add("dragging");
-  ev.dataTransfer.effectAllowed = "move";
-  /* Firefox refuses to start a drag unless the transfer carries something */
-  try{ ev.dataTransfer.setData("text/plain", catDrag); }catch(e){}
-});
-
-document.addEventListener("dragover", ev=>{
-  if(catDrag===null) return;
-  const at = catDropAt(ev);
-  if(!at) return;
-  ev.preventDefault();
-  ev.dataTransfer.dropEffect = "move";
-  $$("tr[data-catrow]").forEach(x=>x.classList.remove("dropabove","dropbelow"));
-  at.row.classList.add(at.below ? "dropbelow" : "dropabove");
-});
-
-document.addEventListener("drop", ev=>{
-  if(catDrag===null) return;
-  const at = catDropAt(ev);
-  if(!at) return;
-  ev.preventDefault();
-  const a = db.categories, moved = catDrag;
-  const from = a.indexOf(moved);
-  catDrag = null; catDropMarks();
-  if(from < 0) return;
-  const was = a.slice();
-  a.splice(from, 1);
-  const to = a.indexOf(at.row.dataset.catrow);
-  if(to < 0){ db.categories = was; return; }
-  a.splice(at.below ? to+1 : to, 0, moved);
-  if(a.join(" ")===was.join(" ")) return;   /* landed where it began */
-  save(); render();
-  toast(moved+" moved", "Undo", ()=>{ db.categories = was; save(); render(); });
-});
-
-document.addEventListener("dragend", ()=>{ catDrag = null; catDropMarks(); });
-
-document.addEventListener("input", ev=>{
-  /* an order quantity, edited in place. No render: it would take the caret
-     out of the box being typed in, so the note and the total are brought up
-     to date by hand instead.                                             */
-  if(ev.target.classList && ev.target.classList.contains("pendbox")){
-    const o = (db.pending||[]).find(x=>x.id===Number(ev.target.dataset.o));
-    const l = o && o.lines[Number(ev.target.dataset.i)];
-    if(l){ l.box = ev.target.value.trim().toUpperCase(); save(); }
-    return;
-  }
-  if(ev.target.classList && ev.target.classList.contains("ordqty")){
-    const rows = ui.order||[];
-    const r = rows[Number(ev.target.dataset.i)];
-    if(!r) return;
-    r.qty = Math.max(0, Math.floor(Number(ev.target.value)||0));
-    orderSync(Number(ev.target.dataset.i));
-    return;
-  }
-  if(ev.target.id==="bomText"){ ui.bomText = ev.target.value; return; }
-  if(ev.target.id==="bomName"){ ui.bomName = ev.target.value; return; }
-  if(ev.target.id==="rcvText"){ ui.rcvText = ev.target.value; return; }
-  if(ev.target.id==="bomQty"){  ui.bomQty  = Math.max(1, Number(ev.target.value)||1); return; }
-  /* a part number typed onto a BOM line by hand - no render, keep the caret */
-  if(ev.target.classList && ev.target.classList.contains("bommpn")){
-    const i = Number(ev.target.dataset.i);
-    if(ui.bomRows && ui.bomRows[i]) ui.bomRows[i].mpn = ev.target.value.trim();
-    return;
-  }
-  if(ev.target.id==="lcscRelay"){ lcsc.relay = ev.target.value.trim(); lcscSave(); return; }
-  const map = {ghRepo:"repo", ghPath:"path", ghBranch:"branch", ghToken:"token"};
-  const k = map[ev.target.id];
-  if(k){ gh[k] = ev.target.value.trim(); gh.sha = null; ghSave(); }   /* no render: keep the caret */
-});
-
-document.addEventListener("change", ev=>{
-  /* no render: redrawing the table under someone mid-walk would throw away
-     their scroll position for the sake of a tick that is already on screen.
-     The button and the header box are brought up to date by hand instead.  */
-  if(ev.target.id==="pickAll"){
-    const rows = pickRows().filter(r=>r.part && r.take>0);
-    ui.picked = {};
-    if(ev.target.checked) rows.forEach(r=>{ ui.picked[pickKey(r)] = 1; });
-    $$("input.picktick").forEach(b=>{ b.checked = !!ui.picked[b.dataset.pk]; });
-    pickSync();
-    return;
-  }
-  if(ev.target.classList && ev.target.classList.contains("picktick")){
-    const k = ev.target.dataset.pk;
-    if(ev.target.checked) ui.picked[k] = 1; else delete ui.picked[k];
-    pickSync();
-    return;
-  }
-  if(ev.target.classList && ev.target.classList.contains("catmin")){
-    const c = ev.target.dataset.catmin, v = String(ev.target.value).trim();
-    db.catMin = db.catMin || {};
-    if(v==="" || !isFinite(Number(v))) delete db.catMin[c]; else db.catMin[c] = Math.max(0, Math.floor(Number(v)));
-    save(); renderRail();
-    toast(v==="" ? c+": back to the default of 2" : c+": alert at "+db.catMin[c]);
-    return;
-  }
-  if(ev.target.id==="ghAuto"){
-    gh.auto = ev.target.checked; ghSave(); render();
-    if(gh.auto && ghReady() && !ghPulled) ghPull();
-  }
-  if(ev.target.id==="bomMatchMode"){
-    prefs.bomMatch = ev.target.value; prefsSave();
-    rematchBom();      /* re-decide, but keep what has been filled in */
-    ui.order = null; render();
-    return;
-  }
-  if(ev.target.id==="lcscAuto"){   lcsc.auto   = ev.target.checked; lcscSave(); }
-  if(ev.target.id==="lcscPublic"){ lcsc.public = ev.target.checked; lcscSave(); }
-  if(ev.target.id==="sort"){ ui.sort=ev.target.value; render(); }
-  if(ev.target.id==="updCheck"){ prefs.updCheck = ev.target.checked; prefsSave(); updShow(); render(); return; }
-  if(ev.target.id==="scanCamSel"){ prefs.scanCam = ev.target.value; prefsSave(); scanCamStart(ev.target.value); return; }
-  if(ev.target.id==="qrLabels"){ prefs.qrLabels = ev.target.checked; prefsSave(); render(); return; }
-  if(ev.target.id==="qrBase"){
-    const v = ev.target.value.trim();
-    if(v && !/^https?:\/\//i.test(v)){ toast("The address has to start with https:// or http://"); return; }
-    prefs.qrBase = v; prefsSave(); render(); return;
-  }
-  if(ev.target.id==="catSel"){
-    const isNew = ev.target.value==="__new";
-    $("#newCatWrap").hidden = !isNew;
-    if(isNew) $("#newCatInput").focus();
-  }
-  if(ev.target.id==="importInput"){
-    const f = ev.target.files[0]; if(!f) return;
-    const r = new FileReader();
-    r.onload = ()=>{ try{
-        const next = JSON.parse(r.result);
-        if(!next || !Array.isArray(next.parts)) throw new Error("no parts array in that file");
-        /* this replaces the whole bin, and with sync on it goes to GitHub at
-           the next push - so it asks, and it can be taken back            */
-        if(db && db.parts.length && !confirm("Replace the "+db.parts.length+" parts here with the "+
-             next.parts.length+" in "+f.name+"?"+
-             (ghReady()?"\n\nThe next push sends this to "+gh.repo+". GitHub keeps the old version in its history.":""))) return;
-        const prev = JSON.stringify(db);
-        db = normalize(next); save(); render();
-        toast("Loaded "+f.name, "Undo", ()=>{ db = normalize(JSON.parse(prev)); save(); render(); });
-      }catch(e){ toast("Could not load: "+e.message); }
-      finally{ ev.target.value = ""; } };
-    r.readAsText(f);
-  }
-});
-
-$("#q").addEventListener("input", e=>{ ui.q = e.target.value; if(ui.view!=="parts") ui.view="parts"; render(); });
-
-document.addEventListener("keydown", e=>{
-  if(e.key==="Enter" && e.target.id==="newCatField"){ e.preventDefault(); $("#catAdd").click(); return; }
-  /* a handheld scanner types the code and presses Enter, the same as a person */
-  if(e.key==="Enter" && e.target.id==="scanText"){
-    e.preventDefault(); const v = e.target.value; e.target.value = ""; scanHandle(v); return;
-  }
-  if(e.key==="Enter" && e.target.id==="catRenameField"){
-    e.preventDefault(); const b=$("[data-catsave]"); if(b) b.click(); return;
-  }
-  if(e.key==="Escape"){
-    if(!$("#overlay").hidden){ closeEditor(); return; }
-    if(ui.q){ ui.q=""; $("#q").value=""; render(); }
-    return;
-  }
-  const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
-  if(e.key==="/" && !typing){ e.preventDefault(); $("#q").focus(); $("#q").select(); }
-});
-
-/* a change made offline waits as unpushed; send it when the network returns */
-window.addEventListener("online", ()=>{
-  if(gh.auto && ghReady() && ghPulled && gh.dirty){ clearTimeout(ghTimer); ghPushPending = true; chip(); ghTimer = setTimeout(()=>ghPush(true), 1500); }
-});
-
-document.addEventListener("visibilitychange", ()=>{
-  if(document.visibilityState==="visible"){ updCheck(); updCheckPage(); return; }
-  if(document.visibilityState!=="hidden") return;
-  if(fileHandle){ clearTimeout(saveTimer); fileWrite(); }
-  /* do not sit on an unsent change while the tab is being closed */
-  if(ghPushPending){ clearTimeout(ghTimer); ghPush(true); }
-});
-
-/* ------------------------------------------------------------ versions ---
-   The data file carries the version of the page that last saved it. A page
-   older than that still reads it, but will not push it on its own: it
-   could not know what the newer one meant by a field it has never seen.  */
-let newerData = "";                 /* version of a newer page, when one wrote the data */
-let newerOk = "", newerWarned = false;   /* pushing over that version was allowed once by hand */
-function verCmp(a, b){
-  const pa = String(a||"0").split(".").map(Number), pb = String(b||"0").split(".").map(Number);
-  for(let i=0;i<3;i++){ const d = (pa[i]||0) - (pb[i]||0); if(d) return d>0?1:-1; }
-  return 0;
-}
-function noteVersion(d){
-  newerData = d && verCmp(d.app, APP_VERSION) > 0 ? String(d.app) : "";
-}
-
-/* ------------------------------------------------------------ used in ----
-   Which saved boards call for a part, and how many per board. Worked out
-   from the BOM text the same way the BOM tab matches it, cached per edit.  */
-let useCache = {at:null, map:new Map()};
-function usedInMap(){
-  const key = resKey() + "|" + prefs.bomMatch;      /* the match mode changes which part a line names */
-  if(useCache.at === key) return useCache.map;
-  const map = new Map();
-  (db.boms||[]).forEach(b=>{
-    parseBom(b.text).forEach(r=>{
-      const m = matchBom(r);
-      if(!m.p) return;
-      const list = map.get(m.p.id) || [];
-      const hit = list.find(x=>x.id===b.id);
-      if(hit) hit.per += (r.need||1); else list.push({id:b.id, name:b.name, per:(r.need||1), reserve:Number(b.reserve||0)});
-      map.set(m.p.id, list);
-    });
-  });
-  useCache = {at:key, map};
-  return map;
-}
-const usedIn = p => usedInMap().get(p.id) || [];
-function usedInText(p){
-  return usedIn(p).map(u=>u.name+" ×"+u.per+(u.reserve?" (holding "+u.reserve+")":"")).join(" · ");
-}
-
-/* ------------------------------------------------------------- QR code ---
-   A box label carries a QR code that opens the page on that box. No library:
-   byte mode, error correction level M, versions 1 to 10 (up to 213 bytes),
-   which is all a link needs. Follows ISO/IEC 18004 the way Project Nayuki's
-   reference generator lays it out.                                         */
-const QR_ECC = [0,10,16,26,18,24,16,18,22,22,26];    /* EC codewords per block, level M */
-const QR_BLK = [0,1,1,1,2,2,4,4,4,5,5];              /* blocks, level M */
-function qrRawModules(v){
-  let r = (16*v + 128)*v + 64;
-  if(v >= 2){ const n = Math.floor(v/7) + 2; r -= (25*n - 10)*n - 55; if(v >= 7) r -= 36; }
-  return r;
-}
-function qrMul(x, y){
-  let z = 0;
-  for(let i=7;i>=0;i--){ z = (z<<1) ^ ((z>>>7) * 0x11D); z ^= ((y>>>i)&1) * x; }
-  return z & 0xFF;
-}
-function qrDivisor(deg){
-  const r = new Array(deg).fill(0); r[deg-1] = 1;
-  let root = 1;
-  for(let i=0;i<deg;i++){
-    for(let j=0;j<deg;j++){ r[j] = qrMul(r[j], root); if(j+1<deg) r[j] ^= r[j+1]; }
-    root = qrMul(root, 2);
-  }
-  return r;
-}
-function qrRemainder(data, div){
-  const r = div.map(()=>0);
-  for(const b of data){
-    const f = b ^ r.shift(); r.push(0);
-    div.forEach((c,i)=>{ r[i] ^= qrMul(c, f); });
-  }
-  return r;
-}
-function qrEncode(text){
-  const data = Array.from(new TextEncoder().encode(text));
-  const dataCw = v => Math.floor(qrRawModules(v)/8) - QR_ECC[v]*QR_BLK[v];
-  let ver = 1;
-  for(; ver<=10; ver++) if(4 + (ver<10?8:16) + data.length*8 <= dataCw(ver)*8) break;
-  if(ver > 10) throw new Error("too long for a QR label");
-  /* data bits: byte mode, count, bytes, terminator, padding */
-  const bits = [];
-  const put = (v,n)=>{ for(let i=n-1;i>=0;i--) bits.push((v>>>i)&1); };
-  put(4,4); put(data.length, ver<10?8:16); data.forEach(b=>put(b,8));
-  const cap = dataCw(ver)*8;
-  put(0, Math.min(4, cap-bits.length)); put(0, (8 - bits.length%8) % 8);
-  for(let p=0xEC; bits.length<cap; p ^= 0xEC^0x11) put(p,8);
-  const cw = [];
-  for(let i=0;i<bits.length;i+=8){ let b=0; for(let j=0;j<8;j++) b = (b<<1)|bits[i+j]; cw.push(b); }
-  /* error correction, split into blocks and interleaved */
-  const nb = QR_BLK[ver], ecl = QR_ECC[ver], raw = Math.floor(qrRawModules(ver)/8);
-  const nShort = nb - raw%nb, shortLen = Math.floor(raw/nb), div = qrDivisor(ecl);
-  const blocks = [];
-  for(let i=0,k=0;i<nb;i++){
-    const dat = cw.slice(k, k + shortLen - ecl + (i<nShort?0:1)); k += dat.length;
-    const ec = qrRemainder(dat, div);
-    if(i < nShort) dat.push(0);
-    blocks.push(dat.concat(ec));
-  }
-  const all = [];
-  for(let i=0;i<blocks[0].length;i++) blocks.forEach((b,j)=>{ if(i!==shortLen-ecl || j>=nShort) all.push(b[i]); });
-
-  const size = ver*4 + 17;
-  const mod = Array.from({length:size}, ()=>new Array(size).fill(false));
-  const fn  = Array.from({length:size}, ()=>new Array(size).fill(false));
-  const setF = (x,y,on)=>{ mod[y][x] = on; fn[y][x] = true; };
-  for(let i=0;i<size;i++){ setF(6,i,i%2===0); setF(i,6,i%2===0); }
-  [[3,3],[size-4,3],[3,size-4]].forEach(([cx,cy])=>{
-    for(let dy=-4;dy<=4;dy++) for(let dx=-4;dx<=4;dx++){
-      const x=cx+dx, y=cy+dy, d=Math.max(Math.abs(dx),Math.abs(dy));
-      if(x>=0 && x<size && y>=0 && y<size) setF(x,y, d!==2 && d!==4);
-    }
-  });
-  if(ver > 1){
-    const n = Math.floor(ver/7) + 2, step = Math.ceil((ver*4 + 4)/(n*2 - 2))*2;
-    const pos = [6];
-    for(let p=size-7; pos.length<n; p-=step) pos.splice(1,0,p);
-    pos.forEach((y,i)=>pos.forEach((x,j)=>{
-      if((i===0&&j===0) || (i===0&&j===n-1) || (i===n-1&&j===0)) return;
-      for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++) setF(x+dx, y+dy, Math.max(Math.abs(dx),Math.abs(dy))!==1);
-    }));
-  }
-  const drawFormat = mask=>{
-    const d = (0<<3) | mask;                 /* level M = 00 */
-    let rem = d; for(let i=0;i<10;i++) rem = (rem<<1) ^ ((rem>>>9) * 0x537);
-    const b = ((d<<10) | rem) ^ 0x5412, bit = i=>((b>>>i)&1)===1;
-    for(let i=0;i<=5;i++) setF(8,i,bit(i));
-    setF(8,7,bit(6)); setF(8,8,bit(7)); setF(7,8,bit(8));
-    for(let i=9;i<15;i++) setF(14-i,8,bit(i));
-    for(let i=0;i<8;i++) setF(size-1-i,8,bit(i));
-    for(let i=8;i<15;i++) setF(8,size-15+i,bit(i));
-    setF(8,size-8,true);
-  };
-  drawFormat(0);
-  if(ver >= 7){
-    let rem = ver; for(let i=0;i<12;i++) rem = (rem<<1) ^ ((rem>>>11) * 0x1F25);
-    const b = (ver<<12) | rem;
-    for(let i=0;i<18;i++){
-      const on = ((b>>>i)&1)===1, a = size-11+i%3, c = Math.floor(i/3);
-      setF(a,c,on); setF(c,a,on);
-    }
-  }
-  /* the codewords, zigzagging up and down in column pairs */
-  let k = 0;
-  for(let right=size-1; right>=1; right-=2){
-    if(right===6) right = 5;
-    for(let v=0; v<size; v++) for(let j=0;j<2;j++){
-      const x = right-j, up = ((right+1)&2)===0, y = up ? size-1-v : v;
-      if(!fn[y][x] && k < all.length*8){ mod[y][x] = ((all[k>>>3]>>>(7-(k&7)))&1)===1; k++; }
-    }
-  }
-  const maskOn = (m,x,y)=>[
-    (x+y)%2===0, y%2===0, x%3===0, (x+y)%3===0,
-    (Math.floor(x/3)+Math.floor(y/2))%2===0, x*y%2 + x*y%3===0,
-    (x*y%2 + x*y%3)%2===0, ((x+y)%2 + x*y%3)%2===0][m];
-  const applyMask = m=>{ for(let y=0;y<size;y++) for(let x=0;x<size;x++) if(!fn[y][x] && maskOn(m,x,y)) mod[y][x] = !mod[y][x]; };
-  /* every mask decodes; the spec's penalty picks the one that scans best.
-     Runs, 2x2 blocks and balance are scored - enough to avoid the bad ones. */
-  const penalty = ()=>{
-    let p = 0, dark = 0;
-    for(let a=0;a<size;a++){
-      let rr=1, rc=1;
-      for(let b=1;b<size;b++){
-        if(mod[a][b]===mod[a][b-1]){ if(++rr===5) p+=3; else if(rr>5) p++; } else rr=1;
-        if(mod[b][a]===mod[b-1][a]){ if(++rc===5) p+=3; else if(rc>5) p++; } else rc=1;
-      }
-    }
-    for(let y=0;y<size;y++) for(let x=0;x<size;x++){
-      if(mod[y][x]) dark++;
-      if(x<size-1 && y<size-1){ const c=mod[y][x]; if(c===mod[y][x+1] && c===mod[y+1][x] && c===mod[y+1][x+1]) p+=3; }
-    }
-    return p + Math.floor(Math.abs(dark*20 - size*size*10)/(size*size)) * 10;
-  };
-  let best = 0, bestP = Infinity;
-  for(let m=0;m<8;m++){
-    applyMask(m); drawFormat(m);
-    const p = penalty();
-    if(p < bestP){ bestP = p; best = m; }
-    applyMask(m);
-  }
-  applyMask(best); drawFormat(best);
-  return mod;
-}
-/* drawn as one SVG path with the four-module quiet zone the spec asks for */
-function qrSvg(text, px){
-  let m;
-  try{ m = qrEncode(text); }catch(e){ return ""; }
-  const n = m.length, q = 4, w = n + q*2;
-  let d = "";
-  for(let y=0;y<n;y++) for(let x=0;x<n;x++) if(m[y][x]) d += `M${x+q},${y+q}h1v1h-1z`;
-  return `<svg class="qr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${w}" width="${px}" height="${px}"
-    shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="${w}" height="${w}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
-}
-/* what a box label links to: this page at its own address, or the address
-   set under Labels - a page opened off the disk has no address to give    */
-function qrBase(){
-  if(prefs.qrBase) return prefs.qrBase.replace(/#.*$/,"");
-  return /^https?:$/.test(location.protocol) ? location.origin + location.pathname : "";
-}
-const boxLink = key => qrBase() + "#box=" + encodeURIComponent(key);
 
 /* -------------------------------------------------------------- routing ---
    #box=C7 opens the parts list on that drawer, #part=12 opens that part,
@@ -5179,6 +4656,698 @@ function updShow(){
     <span class="grow"></span><button class="linkish" type="button" id="updLater" title="hide until the next version">not now</button>`;
 }
 
+/* ------------------------------------------------------------------ wiring */
+document.addEventListener("click", async ev=>{
+  const t = ev.target;
+
+  /* ---- updates */
+  if(t.id==="updReload"){ location.reload(); return; }
+  if(t.id==="updLater"){ const o = updOffer(); if(o){ upd.dismissed = o.v; updSave(); } updShow(); return; }
+  if(t.id==="updNow"){ t.disabled = true; upd.at = 0; upd.pageAt = 0; await updCheck(true); await updCheckPage(true);
+    t.disabled = false; render(); if(!updOffer()) toast("This is the newest version ("+APP_VERSION+")"); return; }
+
+  /* ---- scanning */
+  if(t.closest("#scanBtn")){ if(db) openScan(); return; }
+  if(t.id==="scanCam"){ scanCamStart(); return; }
+  if(t.id==="scanClose"){ closeEditor(); return; }
+  if(t.id==="scanIn" || t.id==="scanOutBtn"){ scanMove(t.dataset.pid, t.id==="scanIn" ? 1 : -1); return; }
+  if(t.id==="scanOpen"){ const p = findPart(t.dataset.pid); scanStop(); if(p) openEditor(p); return; }
+  if(t.id==="scanAdd"){
+    let s = {}; try{ s = JSON.parse($("#scanOut").dataset.scan||"{}"); }catch(e){}
+    scanStop(); openEditor(null, {lcsc:s.lcsc||"", mpn:s.mpn||"", qty:s.qty||0, src:"LCSC"});
+    return;
+  }
+
+  /* the dashed drawer at the end of the wall is not a filter - it is an empty
+     box waiting to be started, so it opens the form with its number already in */
+  const nb = t.closest("[data-newbox]");
+  if(nb){ openEditor(null, {box:nb.dataset.newbox}); return; }
+
+  const drawer = t.closest("[data-box]");
+  if(drawer){ ui.box = ui.box===drawer.dataset.box ? "" : drawer.dataset.box;
+              if(ui.view!=="parts") ui.view="parts";
+              render(); return; }
+
+  const cat = t.closest("[data-cat]");
+  if(cat){ ui.cat = ui.cat===cat.dataset.cat ? "" : cat.dataset.cat; render(); return; }
+
+  const view = t.closest("#views button");
+  if(view){ ui.view = view.dataset.view; render(); return; }
+
+  const cl = t.closest("[data-clear]");
+  if(cl){ const k = cl.dataset.clear; ui[k] = (k==="low") ? false : ""; render(); return; }
+
+  if(t.id==="clearFilters"){ ui.cat=""; ui.box=""; ui.low=false; ui.mfr=""; render(); return; }
+
+  const act = t.closest("[data-act]");
+  if(act){
+    const p = findPart(act.closest(".row").dataset.id);
+    if(!p) return;
+    if(act.dataset.act==="dec") bump(p,-1);
+    else if(act.dataset.act==="inc") bump(p,1);
+    else openEditor(p);
+    return;
+  }
+
+  const mtag = t.closest("[data-mfr]");
+  if(mtag){
+    ui.mfr = ui.mfr===mtag.dataset.mfr ? "" : mtag.dataset.mfr;
+    if(ui.view!=="parts") ui.view="parts";
+    render(); return;
+  }
+
+  const row = t.closest(".row");
+  if(row){ const p = findPart(row.dataset.id); if(p){ openEditor(p); return; } }
+
+  const goto_ = t.closest("[data-view-go]");
+  if(goto_){ ui.view = goto_.dataset.viewGo; render(); return; }
+
+  if(t.id==="bomRun"){
+    ui.bomText = $("#bomText").value;
+    ui.bomQty  = Math.max(1, Number($("#bomQty").value)||1);
+    runBom(); ui.order = null; render();
+    return;
+  }
+  if(t.id==="bomClear"){ ui.bomText=""; ui.bomRows=null; render(); return; }
+
+  if(t.id==="bomFillMpn"){ t.disabled = true; await bomFillMpn(); return; }
+  if(t.id==="bomFillHalt"){ bomFillStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
+  if(/^bomCsv(Jlcpcb|Pcbway|Nextpcb|Pcbgogo)$/.test(t.id||"")){
+    const rows = ui.bomRows || [];
+    if(!rows.length) return toast("Check a BOM against the bin first");
+    const vendor = t.id.replace("bomCsv","").toLowerCase();
+    const name = (ui.bomName||"bom").trim().replace(/[^\w.-]+/g,"-").replace(/^-|-$/g,"") || "bom";
+    download(name+"-"+vendor+".xlsx", bomXlsx(vendor));
+    const noPn = rows.filter(r=>!bomOut(r).mpn).length;
+    toast(noPn ? rows.length+" lines exported — "+noPn+" still carry no part number"
+               : rows.length+" lines exported");
+    return;
+  }
+
+  if(t.id==="bomSave"){
+    const name = ($("#bomName").value||"").trim();
+    const text = $("#bomText").value;
+    if(!name) return toast("Give the board a name first");
+    if(!text.trim()) return toast("Paste the BOM first");
+    const r = bomSave(name, text, $("#bomQty").value);
+    ui.bomName = name; ui.bomText = text;
+    changed(r.updated ? "Updated "+name : "Saved "+name);
+    return;
+  }
+  const brs = t.closest("[data-bomres]"), brl = t.closest("[data-bomrel]");
+  if(brs || brl){
+    const b = bomFind((brs||brl).dataset[brs?"bomres":"bomrel"]);
+    if(!b) return;
+    let n = 0;
+    if(brs){
+      n = Number(prompt("Hold the parts for how many boards of "+b.name+"?", String(b.boards||1)));
+      if(!(n>0)) return;
+      n = Math.floor(n);
+    }
+    const r = bomReserve(b, n);
+    changed(brs ? "Holding parts for "+b.reserve+" × "+b.name : "Released "+b.name, r.undo);
+    return;
+  }
+  const bl = t.closest("[data-bomload]");
+  if(bl){
+    const b = bomFind(bl.dataset.bomload);
+    if(!b) return;
+    ui.bomText = b.text; ui.bomName = b.name; ui.bomQty = b.boards||1;
+    if(bl.dataset.bomgo){ closeEditor(); ui.view = "bom"; }    /* from a part's "Used in" */
+    runBom(); ui.order = null; render();
+    return;
+  }
+  const bd = t.closest("[data-bomdel]");
+  if(bd){
+    const b = bomFind(bd.dataset.bomdel);
+    if(!b) return;
+    /* same reasoning as the delete in the part editor: one stray click and a
+       pasted BOM nobody kept a copy of is gone                             */
+    if(!confirm("Delete the board "+b.name+" and its "+
+                bomCapacity(b.text).lines+" lines?")) return;
+    changed("Deleted "+b.name, bomDelete(b).undo);
+    return;
+  }
+
+  if(t.id==="pickPrint"){
+    /* everything else on this tab is working material - the walk is the only
+       part worth carrying to the shelf                                     */
+    document.body.classList.add("pickonly");
+    window.print();
+    document.body.classList.remove("pickonly");
+    return;
+  }
+  if(t.id==="pickTake"){
+    const rows = pickRows().filter(r=>r.part && r.take>0 && ui.picked[pickKey(r)]);
+    if(!rows.length) return;
+    const pieces = rows.reduce((s,r)=>s+r.take,0);
+    const drawers = new Set(rows.filter(r=>r.box).map(r=>r.box)).size;
+    if(!confirm("Take "+pieces+" pieces off the shelf, from "+drawers+" drawer"+(drawers===1?"":"s")+"?\n\n"+
+                "This deducts them from the bin.")) return;
+    const r = pickTake(rows, ui.bomQty);
+    ui.picked = {};   /* those drawers have been dealt with */
+    changed("Took "+pieces+" off the shelf, "+r.parts+" part"+(r.parts===1?"":"s")+
+            (r.bom ? " · "+r.bom.name+" now holds "+r.bom.reserve : ""), r.undo);
+    return;
+  }
+  if(t.id==="rcvCheck"){
+    ui.rcvText = $("#rcvText").value;
+    ui.receive = parseBom(ui.rcvText).map(r=>{
+      const m = matchBom(r);
+      return {lcsc:r.lcsc||"", mpn:r.mpn||r.val||"", qty:r.need||0, part:m.p};
+    }).filter(r=>r.qty>0 && (r.lcsc||r.mpn));
+    render();
+    return;
+  }
+  if(t.id==="rcvCancel"){ ui.receive=null; render(); return; }
+  if(t.id==="rcvApply"){
+    const list = ui.receive||[];
+    if(!list.length) return;
+    const r = orderReceive(list);
+    ui.receive = null; ui.rcvText = ""; ui.order = null;
+    changed("Booked in "+list.length+" lines"+(r.added?", "+r.added+" new \u2014 give them a box":""), r.undo);
+    return;
+  }
+  if(t.id==="bomToOrder"){ ui.order = buildOrder(); ui.view="order"; render(); return; }
+
+  if(t.id==="orderMark"){ pendingAdd(); return; }
+  const ptk = t.closest("[data-pendtake]");
+  if(ptk){ pendingReceive(Number(ptk.dataset.pendtake)); return; }
+  const pcx = t.closest("[data-pendcancel]");
+  if(pcx){
+    const o = (db.pending||[]).find(x=>x.id===Number(pcx.dataset.pendcancel));
+    if(!o) return;
+    if(!confirm("Cancel the order of "+o.at+"?" + String.fromCharCode(10,10) + "Its "+o.lines.length+" lines go back to the shopping list.")) return;
+    const r = pendingCancel(o);
+    ui.order = null;
+    changed("Order cancelled", r.undo);
+    return;
+  }
+  const pdr = t.closest("[data-penddrop]");
+  if(pdr){
+    const [oid,ix] = pdr.dataset.penddrop.split(":");
+    const o = (db.pending||[]).find(x=>x.id===Number(oid));
+    if(!o) return;
+    const r = pendingDrop(o, Number(ix));
+    changed("Dropped "+(r.gone.mpn||r.gone.lcsc||"the line"), r.undo);
+    return;
+  }
+  const orst = t.closest("[data-ordreset]");
+  if(orst){
+    const i = Number(orst.dataset.ordreset);
+    const r = (ui.order||[])[i];
+    if(r){ r.qty = r.sug; const box = document.querySelector('.ordqty[data-i="'+i+'"]');
+           if(box) box.value = r.qty; orderSync(i); }
+    return;
+  }
+  if(t.id==="orderRefresh"){ ui.order = buildOrder(); render(); toast("Rebuilt"); return; }
+  if(t.id==="orderCsv"){
+    const rows = (ui.order || buildOrder()).filter(r=>Number(r.qty||0)>0);
+    const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
+    download("order.csv", "\uFEFF" + ["lcsc,mpn,category,quantity,why"]
+      .concat(rows.map(r=>[r.lcsc,r.mpn,r.cat,r.qty,r.why].map(q).join(","))).join("\r\n"), "text/csv");
+    return;
+  }
+  if(t.id==="orderLcsc"){
+    const rows = (ui.order || buildOrder()).filter(r=>r.lcsc && Number(r.qty||0)>0);
+    const text = rows.map(r=>r.lcsc+","+r.qty).join("\n");
+    if(!text) return toast("No line carries an LCSC code");
+    try{
+      await navigator.clipboard.writeText(text);
+      toast("Copied "+rows.length+" lines — paste into the LCSC bulk order box");
+    }catch(e){
+      download("lcsc-order.txt", text, "text/plain");
+      toast("Clipboard refused here, downloaded the list instead");
+    }
+    return;
+  }
+
+  if(t.id==="doPrint"){ window.print(); return; }
+
+  const mg = t.closest("[data-merge]");
+  if(mg){
+    const ids = mg.dataset.merge.split(",").map(Number);
+    const list = ids.map(findPart).filter(Boolean);
+    if(list.length<2) return;
+    const r = partsMerge(list);
+    changed("Merged into one row of "+num(r.keep.qty)+" — boxes "+r.keep.box, r.undo);
+    return;
+  }
+
+  if(t.id==="lowChip"){ ui.low=!ui.low; render(); return; }
+  const nq = t.closest("[data-noq]");
+  if(nq || t.id==="showNoVal"){
+    const want = nq ? nq.dataset.noq : "no:value";
+    ui.q = (ui.q.trim().toLowerCase()===want) ? "" : want;
+    ui.cat=""; ui.box=""; ui.mfr=""; ui.low=false;
+    ui.view = "parts"; render();
+    const box = $("#q"); if(box) box.value = ui.q;
+    return;
+  }
+  if(t.id==="clearChip"){ ui.low=false; ui.box=""; ui.cat=""; ui.mfr=""; ui.q=""; $("#q").value=""; render(); return; }
+  if(t.id==="addBtn" || t.id==="addBtn2"){ openEditor(null); return; }
+
+  /* Only offered from the first-run screen, which only appears when the bin
+     is empty - so this can never land on top of anyone's real inventory.  */
+  if(t.id==="loadExample"){
+    t.disabled = true;
+    try{
+      const r = await fetch("example-components.json", {cache:"no-store"});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      const next = JSON.parse(await r.text());
+      if(!next || !Array.isArray(next.parts) || !next.parts.length) throw new Error("no parts in it");
+      db = normalize(next);
+      save(); render();
+      toast(db.parts.length+" example parts loaded — this browser only");
+    }catch(e){
+      t.disabled = false;
+      toast("Could not load the example: "+e.message);
+    }
+    return;
+  }
+
+  if(t.id==="catAdd"){
+    const v = ($("#newCatField").value||"").trim();
+    if(!v) return toast("Type a name first");
+    const r = catAdd(v);
+    if(r.err) return toast(r.err);
+    changed("Added "+v);
+    return;
+  }
+  const ren = t.closest("[data-catren]");
+  if(ren){ ui.editCat = ren.dataset.catren; render(); const i=$("#catRenameField"); if(i){i.focus();i.select();} return; }
+  if(t.id==="catCancel"){ ui.editCat=null; ui.moveCat=null; render(); return; }
+
+  const mask = t.closest("[data-catmoveask]");
+  if(mask){ ui.moveCat = mask.dataset.catmoveask; ui.editCat=null; render(); return; }
+
+  const mv = t.closest("[data-catmove]");
+  if(mv){
+    const from = mv.dataset.catmove, to = $("#moveTarget").value;
+    const r = catMoveParts(from, to);
+    ui.moveCat=null;
+    changed(r.n+" parts moved to "+to, r.undo);
+    return;
+  }
+  const csave = t.closest("[data-catsave]");
+  if(csave){
+    const from = csave.dataset.catsave, to = ($("#catRenameField").value||"").trim();
+    if(!to) return toast("The name cannot be empty");
+    const r = catRename(from, to);
+    if(r.err) return toast(r.err);
+    if(ui.cat===from) ui.cat = to;
+    ui.editCat=null;
+    changed("Renamed to "+to);
+    return;
+  }
+  const cdel = t.closest("[data-catdel]");
+  if(cdel){
+    const c = cdel.dataset.catdel;
+    const r = catDelete(c);
+    if(r.err) return toast(r.err);
+    if(ui.cat===c) ui.cat="";
+    changed("Deleted the category "+c, r.undo);
+    return;
+  }
+  if(t.id==="overlay"){ closeEditor(); return; }
+
+  if(t.id==="exportJson"){ download("components.json", JSON.stringify(db,null,1), "application/json"); return; }
+  if(t.id==="exportCsv"){ download("components.csv", "\uFEFF"+toCsv(), "text/csv"); return; }
+  if(t.id==="importBtn"){ $("#importInput").click(); return; }
+  if(t.id==="reconnect"){
+    try{
+      const perm = await pendingHandle.requestPermission({mode:"readwrite"});
+      if(perm!=="granted") return toast("Permission refused");
+      fileHandle = pendingHandle; pendingHandle = null; reconnectArmed = false;
+      await adoptFile(); chip(); render(); toast("Writing to "+fileHandle.name+" again");
+    }catch(e){ toast("Could not reconnect: "+e.message); }
+    return;
+  }
+  if(t.id==="bulkMfr"){
+    const list = filtered();
+    const cur  = [...new Set(list.map(p=>p.mfr).filter(Boolean))];
+    const name = prompt("Manufacturer for these "+list.length+" parts:\n\n"+
+                        "(empty clears it)"+(cur.length?"\n\nalready set: "+cur.join(", "):""),
+                        cur.length===1?cur[0]:"");
+    if(name===null) return;
+    const r = partsSetMfr(list, name.trim());
+    changed((name.trim()?"Set "+name.trim()+" on ":"Cleared the manufacturer on ")+list.length+" parts", r.undo);
+    return;
+  }
+
+  if(t.id==="valScan"){
+    const hits = guessValueList();
+    $("#valWork").innerHTML = hits.length
+      ? `<table style="margin-top:12px"><thead><tr><th>Category</th><th>Part</th>
+          <th>Would read</th><th>From the description</th></tr></thead><tbody>
+          ${hits.slice(0,60).map(h=>`<tr><td>${esc(h.p.cat)}</td><td class="m">${esc(h.p.mpn||h.p.lcsc)}</td>
+            <td class="m" style="color:var(--kapton);font-weight:600">${esc(h.val)}</td>
+            <td style="font-size:11.5px;color:var(--ink3)">${esc((h.p.desc||"").slice(0,60))}</td></tr>`).join("")}
+          ${hits.length>60?`<tr><td colspan="4" style="color:var(--ink3)">\u2026and ${hits.length-60} more</td></tr>`:""}
+         </tbody></table>
+         <div class="sheetbar"><button class="btn" id="valApply">Fill in ${hits.length} values</button>
+           <button class="btn ghost" id="valCancel">Cancel</button></div>`
+      : `<p style="margin-top:12px">Nothing readable left \u2014 every passive that states its value already has one.</p>`;
+    return;
+  }
+  if(t.id==="valApply"){
+    const hits = guessValueList();
+    changed("Filled "+hits.length+" values", partsFillValues(hits).undo);
+    return;
+  }
+  if(t.id==="valCancel"){ $("#valWork").innerHTML=""; return; }
+
+  if(t.id==="mfrSuggest"){
+    const hits = suggestMfr();
+    $("#mfrWork").innerHTML = hits.length
+      ? `<table style="margin-top:12px"><thead><tr><th>Part</th><th>Would be set to</th></tr></thead><tbody>
+          ${hits.slice(0,60).map(h=>`<tr><td class="m">${esc(h.p.mpn)}</td><td>${esc(h.name)}</td></tr>`).join("")}
+          ${hits.length>60?`<tr><td colspan="2" style="color:var(--ink3)">…and ${hits.length-60} more</td></tr>`:""}
+         </tbody></table>
+         <div class="sheetbar"><button class="btn" id="mfrApply">Apply to ${hits.length} parts</button>
+         <button class="btn ghost" id="mfrCancel">Cancel</button></div>
+         <p style="color:var(--ink3);font-size:12px">Only part numbers whose maker is unmistakable are listed.
+         Everything else stays empty on purpose — a wrong manufacturer on a BOM line costs more than a blank one.</p>`
+      : `<p style="margin-top:12px">Nothing left to suggest — every recognisable part number already has one.</p>`;
+    return;
+  }
+  if(t.id==="mfrApply"){
+    const hits = suggestMfr();
+    changed("Filled "+hits.length+" manufacturers", partsFillMfr(hits).undo);
+    return;
+  }
+  if(t.id==="mfrCancel"){ $("#mfrWork").innerHTML=""; return; }
+
+  if(t.id==="mfrRename"){
+    const names = mfrList().map(m=>m.name);
+    $("#mfrWork").innerHTML = `<div class="sheetbar" style="margin-top:12px">
+      <select class="sel" id="mfrFrom">${names.map(n=>`<option>${esc(n)}</option>`).join("")}</select>
+      <span class="lab">becomes</span>
+      <input id="mfrTo" placeholder="new name" list="mfrList"
+             style="border:1px solid var(--rule);background:var(--paper);padding:7px 9px;font-family:var(--mono);font-size:13px;border-radius:2px;flex:1;max-width:240px">
+      <datalist id="mfrList">${names.map(n=>`<option value="${esc(n)}">`).join("")}</datalist>
+      <button class="btn" id="mfrDoRename">Apply</button>
+      <button class="btn ghost" id="mfrCancel">Cancel</button></div>
+      <p style="color:var(--ink3);font-size:12px">Typing a name that already exists merges the two.</p>`;
+    return;
+  }
+  if(t.id==="mfrDoRename"){
+    const from = $("#mfrFrom").value, to = ($("#mfrTo").value||"").trim();
+    if(!to) return toast("Type the new name");
+    const r = mfrRename(from, to);
+    if(ui.mfr===from) ui.mfr=to;
+    changed(r.n+" parts moved to "+to, r.undo);
+    return;
+  }
+
+  if(t.id==="devSave"){
+    devSave(($("#devName").value||"").trim());
+    render(); toast("This computer is now "+device);
+    return;
+  }
+  /* moving a category up or down the list it is kept in */
+  const cUp = t.closest("[data-catup]"), cDn = t.closest("[data-catdn]");
+  if(cUp || cDn){
+    const name = (cUp||cDn).dataset[cUp?"catup":"catdn"];
+    if(catShift(name, cUp?-1:1)) changed();
+    return;
+  }
+  if(t.id==="catSortAz" || t.id==="catSortUse"){
+    const r = catSort(t.id==="catSortUse");
+    changed(t.id==="catSortAz"?"Categories sorted A to Z":"Fullest categories first", r.undo);
+    return;
+  }
+
+  if(t.id==="lcscBulkScan"){ t.disabled = true; await lcscBulkRead(); return; }
+  if(t.id==="imgBulkGo"){ t.disabled = true; await imgBulkRun(); return; }
+  if(t.id==="imgBulkHalt"){ imgBulkStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
+  if(t.id==="imgPushGo"){ t.disabled = true;
+    try{ toast("Pushed "+(await imgPush())+" pictures to "+gh.repo); }
+    catch(e){ toast("Push failed: "+e.message); }
+    render(); return; }
+  if(t.id==="lcscBulkHalt"){ lcscBulkStop = true; t.disabled = true; t.textContent = "Stopping…"; return; }
+  if(t.id==="lcscBulkApply"){ lcscBulkApply(); return; }
+  if(t.id==="lcscBulkCancel"){ ui.lcscBulk = null; $("#lcscBulkWork").innerHTML = ""; render(); return; }
+
+  if(t.id==="lcscTest"){
+    const out = $("#lcscTestOut");
+    out.innerHTML = "Asking for C1779…";
+    t.disabled = true;
+    try{
+      const r = await lcscFetch("C1779");
+      const m = lcscMap(r);
+      out.innerHTML = `<b>It works — answered by ${esc(lcscVia)}.</b> C1779 came back as ${esc(m.mpn)}, ${esc(m.mfr)}, ${esc(m.pkg)}` +
+                      (m.val?`, value ${esc(m.val)}`:"") + (m.cat?`, filed under ${esc(m.cat)}`:", no matching category here") + ".";
+    }catch(e){
+      out.innerHTML = `<span class="bad">${esc(e.message)}.</span> Nothing was reached. ` +
+        (lcsc.relay ? "Check the address above — open it in a tab and see what it answers."
+                    : "Set a relay of your own above; the public ones are not answering.");
+    } finally { t.disabled = false; }
+    return;
+  }
+  const ct = t.closest("[data-conftake]");
+  if(ct || t.id==="confTakeAll"){
+    const list = ui.conflicts || [];
+    const pick = ct ? [list[Number(ct.dataset.conftake)]] : list.slice();
+    conflictsTake(pick);
+    ui.conflicts = list.filter(x=>pick.indexOf(x)<0);
+    if(!ui.conflicts.length) ui.conflicts = null;
+    changed(pick.length+" field"+(pick.length>1?"s":"")+" set to GitHub's value");
+    return;
+  }
+  if(t.id==="confKeep"){ ui.conflicts = null; render(); return; }
+  if(t.id==="lcscFindScan"){ lcscFindBulk(); return; }
+  if(t.id==="lcscFindHalt"){ lcscFindStop = true; return; }
+  if(t.id==="lcscFindApply"){ lcscFindApply(); return; }
+  if(t.id==="lcscFindCancel"){ ui.findBulk = null; render(); return; }
+  if(t.id==="catMinSuggest"){
+    const r = catMinFill();
+    if(r.err) return toast(r.err);
+    changed("Set levels on "+r.n+" categories · "+db.parts.filter(isLow).length+" parts now low", r.undo);
+    return;
+  }
+  if(t.id==="ghPull" || t.id==="ghPullNow"){ await ghPull(); return; }
+  if(t.id==="ghPush"){ await ghPush(); return; }
+  if(t.id==="ghForce"){ await ghPush(false, true); return; }
+
+  if(t.id==="saveNow"){ clearTimeout(saveTimer); await fileWrite(); toast(fileHandle?"Saved":"No data file connected"); return; }
+  if(t.id==="forgetFile"){ fileHandle=null; pendingHandle=null; await idbSet("fileHandle",null); chip(); render(); return; }
+
+  if(t.id==="clearLog"){ if(confirm("Clear the movement log?")){ logClear(); changed(); } return; }
+
+  if(t.id==="connect"){
+    try{
+      fileHandle = await window.showSaveFilePicker({suggestedName:"components.json",
+        types:[{description:"Inventory data",accept:{"application/json":[".json"]}}]});
+      pendingHandle = null;
+      await idbSet("fileHandle", fileHandle);
+      await fileWrite(); chip(); render();
+      toast("Every change now goes straight into "+fileHandle.name);
+    }catch(e){ if(e.name!=="AbortError") toast("Could not open the picker here: "+e.message); }
+    return;
+  }
+  if(t.id==="openfile"){
+    try{
+      const [h] = await window.showOpenFilePicker({types:[{description:"Inventory data",accept:{"application/json":[".json"]}}]});
+      const text = await (await h.getFile()).text();
+      const next = JSON.parse(text);
+      if(!next || !Array.isArray(next.parts)) throw new Error("no parts array in that file");
+      db = normalize(next); fileHandle = h; pendingHandle = null;
+      await idbSet("fileHandle", h);
+      save(); render(); toast("Loaded "+h.name);
+    }catch(e){ if(e.name!=="AbortError") toast("Could not load: "+e.message); }
+    return;
+  }
+});
+
+/* ------------------------------------------- dragging a category about ---
+   The arrows are exact and reachable from a keyboard; a drag is quicker when
+   a shelf has to travel past a dozen others. Both write the same list, and
+   the two sort buttons handle the coarse arrangement, which is what a long
+   list actually needs - nobody drags the fiftieth row to the top.          */
+let catDrag = null;
+const catDropMarks = ()=> $$("tr[data-catrow]").forEach(x=>
+  x.classList.remove("dragging","dropabove","dropbelow"));
+
+/* where the row would land: above the one under the cursor, or below it */
+function catDropAt(ev){
+  const row = ev.target.closest && ev.target.closest("tr[data-catrow]");
+  if(!row || row.dataset.catrow===catDrag) return null;
+  const r = row.getBoundingClientRect();
+  return {row, below: ev.clientY > r.top + r.height/2};
+}
+
+document.addEventListener("dragstart", ev=>{
+  const row = ev.target.closest && ev.target.closest("tr[data-catrow]");
+  if(!row) return;
+  catDrag = row.dataset.catrow;
+  row.classList.add("dragging");
+  ev.dataTransfer.effectAllowed = "move";
+  /* Firefox refuses to start a drag unless the transfer carries something */
+  try{ ev.dataTransfer.setData("text/plain", catDrag); }catch(e){}
+});
+
+document.addEventListener("dragover", ev=>{
+  if(catDrag===null) return;
+  const at = catDropAt(ev);
+  if(!at) return;
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = "move";
+  $$("tr[data-catrow]").forEach(x=>x.classList.remove("dropabove","dropbelow"));
+  at.row.classList.add(at.below ? "dropbelow" : "dropabove");
+});
+
+document.addEventListener("drop", ev=>{
+  if(catDrag===null) return;
+  const at = catDropAt(ev);
+  if(!at) return;
+  ev.preventDefault();
+  const moved = catDrag;
+  catDrag = null; catDropMarks();
+  const r = catMoveTo(moved, at.row.dataset.catrow, at.below);
+  if(r) changed(moved+" moved", r.undo);
+});
+
+document.addEventListener("dragend", ()=>{ catDrag = null; catDropMarks(); });
+
+document.addEventListener("input", ev=>{
+  /* an order quantity, edited in place. No render: it would take the caret
+     out of the box being typed in, so the note and the total are brought up
+     to date by hand instead.                                             */
+  if(ev.target.classList && ev.target.classList.contains("pendbox")){
+    const o = (db.pending||[]).find(x=>x.id===Number(ev.target.dataset.o));
+    const l = o && o.lines[Number(ev.target.dataset.i)];
+    if(l){ pendingLineBox(l, ev.target.value); save(); }
+    return;
+  }
+  if(ev.target.classList && ev.target.classList.contains("ordqty")){
+    const rows = ui.order||[];
+    const r = rows[Number(ev.target.dataset.i)];
+    if(!r) return;
+    r.qty = Math.max(0, Math.floor(Number(ev.target.value)||0));
+    orderSync(Number(ev.target.dataset.i));
+    return;
+  }
+  if(ev.target.id==="bomText"){ ui.bomText = ev.target.value; return; }
+  if(ev.target.id==="bomName"){ ui.bomName = ev.target.value; return; }
+  if(ev.target.id==="rcvText"){ ui.rcvText = ev.target.value; return; }
+  if(ev.target.id==="bomQty"){  ui.bomQty  = Math.max(1, Number(ev.target.value)||1); return; }
+  /* a part number typed onto a BOM line by hand - no render, keep the caret */
+  if(ev.target.classList && ev.target.classList.contains("bommpn")){
+    const i = Number(ev.target.dataset.i);
+    if(ui.bomRows && ui.bomRows[i]) ui.bomRows[i].mpn = ev.target.value.trim();
+    return;
+  }
+  if(ev.target.id==="lcscRelay"){ lcsc.relay = ev.target.value.trim(); lcscSave(); return; }
+  const map = {ghRepo:"repo", ghPath:"path", ghBranch:"branch", ghToken:"token"};
+  const k = map[ev.target.id];
+  if(k){ gh[k] = ev.target.value.trim(); gh.sha = null; ghSave(); }   /* no render: keep the caret */
+});
+
+document.addEventListener("change", ev=>{
+  /* no render: redrawing the table under someone mid-walk would throw away
+     their scroll position for the sake of a tick that is already on screen.
+     The button and the header box are brought up to date by hand instead.  */
+  if(ev.target.id==="pickAll"){
+    const rows = pickRows().filter(r=>r.part && r.take>0);
+    ui.picked = {};
+    if(ev.target.checked) rows.forEach(r=>{ ui.picked[pickKey(r)] = 1; });
+    $$("input.picktick").forEach(b=>{ b.checked = !!ui.picked[b.dataset.pk]; });
+    pickSync();
+    return;
+  }
+  if(ev.target.classList && ev.target.classList.contains("picktick")){
+    const k = ev.target.dataset.pk;
+    if(ev.target.checked) ui.picked[k] = 1; else delete ui.picked[k];
+    pickSync();
+    return;
+  }
+  if(ev.target.classList && ev.target.classList.contains("catmin")){
+    const c = ev.target.dataset.catmin, v = String(ev.target.value).trim();
+    catMinSet(c, v);
+    save(); renderRail();
+    toast(v==="" ? c+": back to the default of 2" : c+": alert at "+db.catMin[c]);
+    return;
+  }
+  if(ev.target.id==="ghAuto"){
+    gh.auto = ev.target.checked; ghSave(); render();
+    if(gh.auto && ghReady() && !ghPulled) ghPull();
+  }
+  if(ev.target.id==="bomMatchMode"){
+    prefs.bomMatch = ev.target.value; prefsSave();
+    rematchBom();      /* re-decide, but keep what has been filled in */
+    ui.order = null; render();
+    return;
+  }
+  if(ev.target.id==="lcscAuto"){   lcsc.auto   = ev.target.checked; lcscSave(); }
+  if(ev.target.id==="lcscPublic"){ lcsc.public = ev.target.checked; lcscSave(); }
+  if(ev.target.id==="sort"){ ui.sort=ev.target.value; render(); }
+  if(ev.target.id==="updCheck"){ prefs.updCheck = ev.target.checked; prefsSave(); updShow(); render(); return; }
+  if(ev.target.id==="scanCamSel"){ prefs.scanCam = ev.target.value; prefsSave(); scanCamStart(ev.target.value); return; }
+  if(ev.target.id==="qrLabels"){ prefs.qrLabels = ev.target.checked; prefsSave(); render(); return; }
+  if(ev.target.id==="qrBase"){
+    const v = ev.target.value.trim();
+    if(v && !/^https?:\/\//i.test(v)){ toast("The address has to start with https:// or http://"); return; }
+    prefs.qrBase = v; prefsSave(); render(); return;
+  }
+  if(ev.target.id==="catSel"){
+    const isNew = ev.target.value==="__new";
+    $("#newCatWrap").hidden = !isNew;
+    if(isNew) $("#newCatInput").focus();
+  }
+  if(ev.target.id==="importInput"){
+    const f = ev.target.files[0]; if(!f) return;
+    const r = new FileReader();
+    r.onload = ()=>{ try{
+        const next = JSON.parse(r.result);
+        if(!next || !Array.isArray(next.parts)) throw new Error("no parts array in that file");
+        /* this replaces the whole bin, and with sync on it goes to GitHub at
+           the next push - so it asks, and it can be taken back            */
+        if(db && db.parts.length && !confirm("Replace the "+db.parts.length+" parts here with the "+
+             next.parts.length+" in "+f.name+"?"+
+             (ghReady()?"\n\nThe next push sends this to "+gh.repo+". GitHub keeps the old version in its history.":""))) return;
+        const prev = JSON.stringify(db);
+        db = normalize(next); save(); render();
+        toast("Loaded "+f.name, "Undo", ()=>{ db = normalize(JSON.parse(prev)); save(); render(); });
+      }catch(e){ toast("Could not load: "+e.message); }
+      finally{ ev.target.value = ""; } };
+    r.readAsText(f);
+  }
+});
+
+$("#q").addEventListener("input", e=>{ ui.q = e.target.value; if(ui.view!=="parts") ui.view="parts"; render(); });
+
+document.addEventListener("keydown", e=>{
+  if(e.key==="Enter" && e.target.id==="newCatField"){ e.preventDefault(); $("#catAdd").click(); return; }
+  /* a handheld scanner types the code and presses Enter, the same as a person */
+  if(e.key==="Enter" && e.target.id==="scanText"){
+    e.preventDefault(); const v = e.target.value; e.target.value = ""; scanHandle(v); return;
+  }
+  if(e.key==="Enter" && e.target.id==="catRenameField"){
+    e.preventDefault(); const b=$("[data-catsave]"); if(b) b.click(); return;
+  }
+  if(e.key==="Escape"){
+    if(!$("#overlay").hidden){ closeEditor(); return; }
+    if(ui.q){ ui.q=""; $("#q").value=""; render(); }
+    return;
+  }
+  const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
+  if(e.key==="/" && !typing){ e.preventDefault(); $("#q").focus(); $("#q").select(); }
+});
+
+/* a change made offline waits as unpushed; send it when the network returns */
+window.addEventListener("online", ()=>{
+  if(gh.auto && ghReady() && ghPulled && gh.dirty){ clearTimeout(ghTimer); ghPushPending = true; chip(); ghTimer = setTimeout(()=>ghPush(true), 1500); }
+});
+
+document.addEventListener("visibilitychange", ()=>{
+  if(document.visibilityState==="visible"){ updCheck(); updCheckPage(); return; }
+  if(document.visibilityState!=="hidden") return;
+  if(fileHandle){ clearTimeout(saveTimer); fileWrite(); }
+  /* do not sit on an unsent change while the tab is being closed */
+  if(ghPushPending){ clearTimeout(ghTimer); ghPush(true); }
+});
+
 /* ------------------------------------------------------------------ PWA ---
    Served over https (GitHub Pages) the page installs like an app and opens
    offline from its last copy. Off the disk there is nothing to install, and
@@ -5193,48 +5362,6 @@ function pwaBoot(){
 }
 
 /* -------------------------------------------------------------------- boot */
-/* Every field this page does not know is carried through untouched: a newer
-   page may have written it, and pushing must not strip it. `base` is set
-   when the copy is only GitHub's last agreed version, not the bin itself. */
-function normalize(d, base){
-  d.parts = (d.parts||[]).map((p,i)=>Object.assign({}, p, {
-    id: Number(p.id||i+1), cat:String(p.cat||"").trim(), lcsc:(p.lcsc||"").toUpperCase().trim(), mpn:String(p.mpn||"").trim(),
-    val:p.val||"", pkg:padPkg(p.pkg), mfr:p.mfr||"", qty:Number(p.qty||0),
-    min:(p.min===null||p.min===undefined||p.min==="")?null:Number(p.min),
-    box:(p.box||"").toUpperCase(), desc:p.desc||"", src:p.src||"", ds:p.ds||"", img:p.img||"",
-    /* unit price in USD at the smallest LCSC break, null when unknown */
-    price:(p.price===null||p.price===undefined||p.price===""||!isFinite(Number(p.price)))?null:Number(p.price)
-  }));
-  /* "Rectifiers " and "Rectifiers" are one shelf - a trailing space split it in two */
-  const cats = new Set((d.categories||[]).map(c=>String(c).trim()).filter(Boolean));
-  d.parts.forEach(p=>{ if(p.cat) cats.add(p.cat); });
-  d.categories = [...cats];
-  d.log = Array.isArray(d.log)? d.log : [];
-  d.boms = Array.isArray(d.boms) ? d.boms.map(b=>Object.assign({}, b, {
-    id:Number(b.id||Date.now()), name:String(b.name||"board"), text:String(b.text||""),
-    boards:Number(b.boards||1), updated:String(b.updated||""), reserve:Math.max(0, Number(b.reserve||0))
-  })) : [];
-  /* alert level per category: keep only real numbers, keyed by the trimmed name */
-  const cm = {};
-  Object.entries(d.catMin && typeof d.catMin==="object" ? d.catMin : {}).forEach(([k,v])=>{
-    if(v!==null && v!=="" && isFinite(Number(v))) cm[String(k).trim()] = Number(v); });
-  d.catMin = cm;
-  /* orders placed and not yet on the shelf. Kept in the data file, so the
-     bench that ordered and the bench that unpacks are the same list.    */
-  d.pending = Array.isArray(d.pending) ? d.pending.map(o=>Object.assign({}, o, {
-    id:Number(o.id||Date.now()), at:String(o.at||""),
-    lines:(Array.isArray(o.lines)?o.lines:[]).map(l=>Object.assign({}, l, {
-      pid:(l.pid===null||l.pid===undefined)?null:Number(l.pid),
-      lcsc:(l.lcsc||"").toUpperCase(), mpn:l.mpn||"", val:l.val||"", cat:l.cat||"",
-      qty:Number(l.qty||0), box:(l.box||"").toUpperCase(),
-      desc:l.desc||"", pkg:padPkg(l.pkg)
-    })).filter(l=>l.qty>0)
-  })).filter(o=>o.lines.length) : [];
-  d.version = 1;
-  if(!base) noteVersion(d);
-  return d;
-}
-
 (function boot(){
   try{
     devLoad();
