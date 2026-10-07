@@ -385,7 +385,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "2.4.0";
+const APP_VERSION = "2.4.1";
 const REPO_URL = "https://github.com/AJEngineering/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -731,7 +731,7 @@ function mergeById(B, M, T, both){
     out.push(m);                                 /* added here - or edited here */
   }
   /* two different parts that happened to take the same next number */
-  let next = out.reduce((n,x)=>Math.max(n, Number(x.id)||0), 0) + 1;
+  let next = nextId(out);
   twins.forEach(m=> out.push(Object.assign({}, m, {id: next++})));
   return out;
 }
@@ -3802,6 +3802,272 @@ function bump(p, d){
   save(); render();
 }
 
+/* save, redraw, and say what happened - with an Undo when the change
+   handed one back. The undo only puts db back; this saves and redraws.  */
+function changed(msg, undo){
+  save(); render();
+  if(msg) toast(msg, "Undo", undo ? ()=>{ undo(); save(); render(); } : null);
+}
+
+/* --------------------------------------------------- changes to the data ---
+   What the buttons do to the bin itself. Each one changes db and the log
+   and nothing else: no DOM, no confirm, no save, no redraw - the wiring
+   asks, then calls one of these, then calls changed(). Each hands back
+   what the toast needs and an undo that puts db back the way it was.    */
+
+/* the next free id in a list: parts, and the twins a merge renumbers */
+const nextId = list => 1 + (list||[]).reduce((n,x)=>Math.max(n, Number(x.id)||0), 0);
+const bomFind = id => (db.boms||[]).find(x=>x.id===Number(id));
+
+/* one field on many parts; the undo puts each part's own old value back */
+function partsSet(k, pairs){
+  const before = pairs.map(([p])=>[p, p[k]||""]);
+  pairs.forEach(([p,v])=>{ p[k] = v; });
+  return ()=>before.forEach(([p,w])=>{ p[k] = w; });
+}
+
+/* a saved board under the same name (any case) is replaced, keeping its id
+   and whatever it holds reserved                                          */
+function bomSave(name, text, boards){
+  db.boms = db.boms || [];
+  const at = db.boms.findIndex(b=>b.name.toLowerCase()===name.toLowerCase());
+  const rec = {id: at>=0?db.boms[at].id:Date.now(), name, text,
+               boards: Math.max(1,Number(boards)||1),
+               reserve: at>=0?Number(db.boms[at].reserve||0):0,
+               updated: new Date().toISOString()};
+  if(at>=0) db.boms[at] = rec; else db.boms.push(rec);
+  return {updated: at>=0};
+}
+
+/* hold the parts for n boards of b; n = 0 releases them */
+function bomReserve(b, n){
+  const was = Number(b.reserve||0);
+  b.reserve = n;
+  rematchBom();
+  return {undo: ()=>{ b.reserve = was; rematchBom(); }};
+}
+
+function bomDelete(b){
+  const at = (db.boms||[]).indexOf(b);
+  db.boms = (db.boms||[]).filter(x=>x.id!==b.id);
+  return {undo: ()=>{ db.boms.splice(Math.min(at,db.boms.length),0,b); }};
+}
+
+/* Take the ticked drawers off the shelf. One movement per part, not per
+   drawer: the log is about stock, and a part taken from two drawers left
+   the shelf once. The board just built no longer needs its parts held. */
+function pickTake(rows, boards){
+  const byPart = new Map();
+  rows.forEach(r=>{
+    const e = byPart.get(r.part) || {take:0, boxes:{}};
+    e.take += r.take;
+    if(r.box) e.boxes[r.box] = (e.boxes[r.box]||0) + r.take;
+    byPart.set(r.part, e);
+  });
+  const undo = [];
+  byPart.forEach((e, p)=>{
+    const was = Number(p.qty||0), wasBox = p.box;
+    undo.push({p, was, wasBox});
+    p.qty = Math.max(0, was - e.take);
+    p.box = boxAfterPick(p, e.boxes);
+    logAdd({k:"qty", id:p.id, mpn:p.mpn, lcsc:p.lcsc, cat:p.cat,
+            d:p.qty-was, a:was, b:p.qty});
+  });
+  const ob = (db.boms||[]).find(b=>b.id===openBomId());
+  const resWas = ob ? Number(ob.reserve||0) : 0;
+  if(ob && resWas) ob.reserve = Math.max(0, resWas - Math.max(1, Number(boards)||1));
+  rematchBom();
+  return {parts: byPart.size, bom: ob && resWas ? ob : null, undo: ()=>{
+    undo.forEach(u=>{ u.p.qty = u.was; u.p.box = u.wasBox; });
+    if(ob) ob.reserve = resWas;
+    rematchBom();
+  }};
+}
+
+/* book in an order: lines that matched a part add to it, the rest become
+   new parts with no box yet                                              */
+function orderReceive(list){
+  const undo = [];
+  list.forEach(r=>{
+    if(r.part){
+      undo.push({p:r.part, was:Number(r.part.qty||0)});
+      r.part.qty = Number(r.part.qty||0) + r.qty;
+      logAdd({k:"qty", id:r.part.id, mpn:r.part.mpn, lcsc:r.part.lcsc, cat:r.part.cat,
+              d:r.qty, a:undo[undo.length-1].was, b:r.part.qty});
+    } else {
+      const rec = {id: nextId(db.parts),
+                   cat: db.categories[0]||"Uncategorised", lcsc:r.lcsc.toUpperCase(), mpn:r.mpn,
+                   val:"", pkg:"", mfr:"", qty:r.qty, min:null, box:"", desc:"", src:"order"};
+      if(!db.categories.includes(rec.cat)) db.categories.push(rec.cat);
+      db.parts.push(rec);
+      undo.push({p:rec, isNew:true});
+      logAdd({k:"add", id:rec.id, mpn:rec.mpn, lcsc:rec.lcsc, cat:rec.cat, b:rec.qty});
+    }
+  });
+  return {added: list.filter(r=>!r.part).length, undo: ()=>{
+    undo.forEach(u=>{ if(u.isNew) db.parts = db.parts.filter(x=>x!==u.p); else u.p.qty = u.was; });
+  }};
+}
+
+function pendingCancel(o){
+  db.pending = db.pending.filter(x=>x!==o);
+  return {undo: ()=>{ db.pending.push(o); }};
+}
+
+/* one line off an order on its way; an order left empty goes with it */
+function pendingDrop(o, ix){
+  const gone = o.lines.splice(ix,1)[0];
+  if(!o.lines.length) db.pending = db.pending.filter(x=>x!==o);
+  return {gone, undo: ()=>{
+    if(!db.pending.includes(o)) db.pending.push(o);
+    o.lines.splice(ix,0,gone);
+  }};
+}
+
+/* Duplicates into the first of them. Boxes become an explicit split so no
+   quantity is invented or lost; an empty field takes the first filled one. */
+function partsMerge(list){
+  const snapshot = list.map(p=>({p, copy:JSON.parse(JSON.stringify(p))}));
+  const keep = list[0];
+  const boxes = [];
+  list.forEach(p=>{
+    partBoxes(p).forEach(tk=>{
+      const q = qtyInBox(p, tk.key)||0;
+      const e = boxes.find(b=>b.key===tk.key);
+      if(e) e.q += q; else boxes.push({key:tk.key, q:q});
+    });
+  });
+  keep.qty = list.reduce((s,p)=>s+Number(p.qty||0),0);
+  keep.box = boxes.map(b=> boxes.length>1 ? b.key+":"+Math.round(b.q) : b.key).join(" + ");
+  list.slice(1).forEach(p=>{
+    if(!keep.lcsc && p.lcsc) keep.lcsc = p.lcsc;
+    if(!keep.mfr  && p.mfr)  keep.mfr  = p.mfr;
+    if(!keep.src  && p.src)  keep.src  = p.src;
+    if(!keep.desc && p.desc) keep.desc = p.desc;
+  });
+  const gone = list.slice(1).map(p=>({p, at:db.parts.indexOf(p)}));
+  const drop = new Set(list.slice(1));
+  db.parts = db.parts.filter(p=>!drop.has(p) || p===keep);
+  logAdd({k:"edit", id:keep.id, mpn:keep.mpn, lcsc:keep.lcsc, cat:keep.cat,
+          b:keep.qty, d:0});
+  return {keep, undo: ()=>{
+    snapshot.forEach(sn=>Object.assign(sn.p, sn.copy));
+    gone.sort((a,b)=>a.at-b.at).forEach(g=>db.parts.splice(Math.min(g.at, db.parts.length),0,g.p));
+  }};
+}
+
+function partsSetMfr(list, name){
+  const undo = partsSet("mfr", list.map(p=>[p, name]));
+  logAdd({k:"edit", mpn:"("+list.length+" parts)", cat:name||"cleared manufacturer"});
+  return {undo};
+}
+
+/* hits: [{p, val}] from guessValueList */
+function partsFillValues(hits){
+  const undo = partsSet("val", hits.map(h=>[h.p, h.val]));
+  logAdd({k:"edit", mpn:"("+hits.length+" parts)", cat:"value read from description"});
+  return {undo};
+}
+
+/* hits: [{p, name}] from suggestMfr */
+function partsFillMfr(hits){
+  const undo = partsSet("mfr", hits.map(h=>[h.p, h.name]));
+  logAdd({k:"edit", mpn:"("+hits.length+" parts)", cat:"manufacturer from part number"});
+  return {undo};
+}
+
+/* a name that already exists merges the two */
+function mfrRename(from, to){
+  const hit = db.parts.filter(p=>(p.mfr||"")===from);
+  return {n: hit.length, undo: partsSet("mfr", hit.map(p=>[p, to]))};
+}
+
+/* GitHub's value into each listed clash */
+function conflictsTake(pick){
+  pick.forEach(x=>{ const p = x && findPart(x.id); if(p) p[x.k] = x.theirs; });
+}
+
+function catAdd(name){
+  if(db.categories.includes(name)) return {err:"That category already exists"};
+  db.categories.push(name);
+  return {};
+}
+
+/* the name carries everything with it: parts, and the category's alert level */
+function catRename(from, to){
+  if(to!==from && db.categories.includes(to)) return {err:"That category already exists"};
+  db.categories = db.categories.map(c=>c===from?to:c);
+  db.parts.forEach(p=>{ if(p.cat===from) p.cat=to; });
+  if(db.catMin && db.catMin[from]!=null && to!==from){ db.catMin[to] = db.catMin[from]; delete db.catMin[from]; }
+  return {};
+}
+
+function catMoveParts(from, to){
+  const moved = db.parts.filter(p=>p.cat===from);
+  return {n: moved.length, undo: partsSet("cat", moved.map(p=>[p, to]))};
+}
+
+/* only an empty category can go */
+function catDelete(c){
+  if(db.parts.some(p=>p.cat===c)) return {err:"Move its parts out first"};
+  const at = db.categories.indexOf(c);
+  db.categories = db.categories.filter(x=>x!==c);
+  return {undo: ()=>{ db.categories.splice(Math.min(at, db.categories.length), 0, c); }};
+}
+
+/* one place up (dir -1) or down (dir 1); false at either end */
+function catShift(name, dir){
+  const a = db.categories, i = a.indexOf(name), j = i + dir;
+  if(i<0 || j<0 || j>=a.length) return false;
+  a[i] = a[j]; a[j] = name;
+  return true;
+}
+
+/* A to Z, or the fullest first */
+function catSort(byUse){
+  const was = db.categories.slice();
+  if(!byUse) db.categories.sort((x,y)=>x.localeCompare(y));
+  else {
+    const n = c => db.parts.filter(p=>p.cat===c).length;
+    db.categories.sort((x,y)=> n(y)-n(x) || x.localeCompare(y));
+  }
+  return {undo: ()=>{ db.categories = was; }};
+}
+
+/* a starting alert level on every category that has none */
+function catMinFill(){
+  db.catMin = db.catMin || {};
+  const was = Object.assign({}, db.catMin);
+  const set = db.categories.filter(c=>db.catMin[c]==null);
+  if(!set.length) return {err:"Every category already has a level"};
+  set.forEach(c=>{ db.catMin[c] = suggestCatMin(c); });
+  return {n: set.length, undo: ()=>{ db.catMin = was; }};
+}
+
+/* a category dropped above or below another; null when it did not move */
+function catMoveTo(name, target, below){
+  const a = db.categories, from = a.indexOf(name);
+  if(from < 0) return null;
+  const was = a.slice();
+  a.splice(from, 1);
+  const to = a.indexOf(target);
+  if(to < 0){ db.categories = was; return null; }
+  a.splice(below ? to+1 : to, 0, name);
+  if(a.join("\0")===was.join("\0")) return null;   /* landed where it began */
+  return {undo: ()=>{ db.categories = was; }};
+}
+
+/* "" or anything not a number goes back to the default */
+function catMinSet(c, v){
+  db.catMin = db.catMin || {};
+  if(v==="" || !isFinite(Number(v))) delete db.catMin[c]; else db.catMin[c] = Math.max(0, Math.floor(Number(v)));
+}
+
+/* the drawer a line on its way is meant for */
+function pendingLineBox(l, box){ l.box = String(box).trim().toUpperCase(); }
+
+function logClear(){ db.log = []; }
+
 /* `seed` pre-fills a blank form - the free drawer on the wall uses it to hand
    over the box number it is standing for, and "add another" hands back the
    box and the shelf so a whole drawer can be filled without stopping.       */
@@ -3870,7 +4136,7 @@ function openEditor(p, seed){
                  price:get("price")===""||!isFinite(Number(get("price")))?null:Number(get("price")),
                  qty:Number(f.get("qty")||0), min:get("min")===""?null:Number(f.get("min"))};
     if(isNew){
-      rec.id = 1+db.parts.reduce((m,p)=>Math.max(m,p.id),0);
+      rec.id = nextId(db.parts);
       db.parts.push(rec);
       logAdd({k:"add", id:rec.id, mpn:rec.mpn, lcsc:rec.lcsc, cat:rec.cat, b:rec.qty});
     } else {
@@ -4483,35 +4749,28 @@ document.addEventListener("click", async ev=>{
     const text = $("#bomText").value;
     if(!name) return toast("Give the board a name first");
     if(!text.trim()) return toast("Paste the BOM first");
-    db.boms = db.boms || [];
-    const at = db.boms.findIndex(b=>b.name.toLowerCase()===name.toLowerCase());
-    const rec = {id: at>=0?db.boms[at].id:Date.now(), name, text,
-                 boards: Math.max(1,Number($("#bomQty").value)||1),
-                 reserve: at>=0?Number(db.boms[at].reserve||0):0,
-                 updated: new Date().toISOString()};
-    if(at>=0) db.boms[at] = rec; else db.boms.push(rec);
+    const r = bomSave(name, text, $("#bomQty").value);
     ui.bomName = name; ui.bomText = text;
-    save(); render();
-    toast(at>=0 ? "Updated "+name : "Saved "+name);
+    changed(r.updated ? "Updated "+name : "Saved "+name);
     return;
   }
   const brs = t.closest("[data-bomres]"), brl = t.closest("[data-bomrel]");
   if(brs || brl){
-    const b = (db.boms||[]).find(x=>x.id===Number((brs||brl).dataset[brs?"bomres":"bomrel"]));
+    const b = bomFind((brs||brl).dataset[brs?"bomres":"bomrel"]);
     if(!b) return;
-    const was = Number(b.reserve||0);
+    let n = 0;
     if(brs){
-      const n = Number(prompt("Hold the parts for how many boards of "+b.name+"?", String(b.boards||1)));
+      n = Number(prompt("Hold the parts for how many boards of "+b.name+"?", String(b.boards||1)));
       if(!(n>0)) return;
-      b.reserve = Math.floor(n);
-    } else b.reserve = 0;
-    rematchBom(); save(); render();
-    toast(brs ? "Holding parts for "+b.reserve+" × "+b.name : "Released "+b.name, "Undo", ()=>{ b.reserve = was; rematchBom(); save(); render(); });
+      n = Math.floor(n);
+    }
+    const r = bomReserve(b, n);
+    changed(brs ? "Holding parts for "+b.reserve+" × "+b.name : "Released "+b.name, r.undo);
     return;
   }
   const bl = t.closest("[data-bomload]");
   if(bl){
-    const b = (db.boms||[]).find(x=>x.id===Number(bl.dataset.bomload));
+    const b = bomFind(bl.dataset.bomload);
     if(!b) return;
     ui.bomText = b.text; ui.bomName = b.name; ui.bomQty = b.boards||1;
     if(bl.dataset.bomgo){ closeEditor(); ui.view = "bom"; }    /* from a part's "Used in" */
@@ -4520,18 +4779,13 @@ document.addEventListener("click", async ev=>{
   }
   const bd = t.closest("[data-bomdel]");
   if(bd){
-    const id = Number(bd.dataset.bomdel);
-    const b = (db.boms||[]).find(x=>x.id===id);
+    const b = bomFind(bd.dataset.bomdel);
+    if(!b) return;
     /* same reasoning as the delete in the part editor: one stray click and a
        pasted BOM nobody kept a copy of is gone                             */
-    if(b && !confirm("Delete the board "+b.name+" and its "+
-                     bomCapacity(b.text).lines+" lines?")) return;
-    const at = (db.boms||[]).indexOf(b);
-    db.boms = (db.boms||[]).filter(x=>x.id!==id);
-    save(); render();
-    toast("Deleted "+(b?b.name:"board"), "Undo", ()=>{
-      db.boms.splice(Math.min(at,db.boms.length),0,b); save(); render();
-    });
+    if(!confirm("Delete the board "+b.name+" and its "+
+                bomCapacity(b.text).lines+" lines?")) return;
+    changed("Deleted "+b.name, bomDelete(b).undo);
     return;
   }
 
@@ -4550,37 +4804,10 @@ document.addEventListener("click", async ev=>{
     const drawers = new Set(rows.filter(r=>r.box).map(r=>r.box)).size;
     if(!confirm("Take "+pieces+" pieces off the shelf, from "+drawers+" drawer"+(drawers===1?"":"s")+"?\n\n"+
                 "This deducts them from the bin.")) return;
-    /* one movement per part, not per drawer: the log is about stock, and a
-       part taken from two drawers left the shelf once                     */
-    const byPart = new Map();
-    rows.forEach(r=>{
-      const e = byPart.get(r.part) || {take:0, boxes:{}};
-      e.take += r.take;
-      if(r.box) e.boxes[r.box] = (e.boxes[r.box]||0) + r.take;
-      byPart.set(r.part, e);
-    });
-    const undo = [];
-    byPart.forEach((e, p)=>{
-      const was = Number(p.qty||0), wasBox = p.box;
-      undo.push({p, was, wasBox});
-      p.qty = Math.max(0, was - e.take);
-      p.box = boxAfterPick(p, e.boxes);
-      logAdd({k:"qty", id:p.id, mpn:p.mpn, lcsc:p.lcsc, cat:p.cat,
-              d:p.qty-was, a:was, b:p.qty});
-    });
+    const r = pickTake(rows, ui.bomQty);
     ui.picked = {};   /* those drawers have been dealt with */
-    /* the board just built no longer needs its parts held */
-    const ob = (db.boms||[]).find(b=>b.id===openBomId());
-    const resWas = ob ? Number(ob.reserve||0) : 0;
-    if(ob && resWas) ob.reserve = Math.max(0, resWas - Math.max(1, Number(ui.bomQty)||1));
-    rematchBom();
-    save(); render();
-    toast("Took "+pieces+" off the shelf, "+byPart.size+" part"+(byPart.size===1?"":"s")+
-          (ob && resWas ? " · "+ob.name+" now holds "+ob.reserve : ""), "Undo", ()=>{
-      undo.forEach(u=>{ u.p.qty = u.was; u.p.box = u.wasBox; });
-      if(ob) ob.reserve = resWas;
-      rematchBom(); save(); render();
-    });
+    changed("Took "+pieces+" off the shelf, "+r.parts+" part"+(r.parts===1?"":"s")+
+            (r.bom ? " · "+r.bom.name+" now holds "+r.bom.reserve : ""), r.undo);
     return;
   }
   if(t.id==="rcvCheck"){
@@ -4596,30 +4823,9 @@ document.addEventListener("click", async ev=>{
   if(t.id==="rcvApply"){
     const list = ui.receive||[];
     if(!list.length) return;
-    const undo = [];
-    list.forEach(r=>{
-      if(r.part){
-        undo.push({p:r.part, was:Number(r.part.qty||0)});
-        r.part.qty = Number(r.part.qty||0) + r.qty;
-        logAdd({k:"qty", id:r.part.id, mpn:r.part.mpn, lcsc:r.part.lcsc, cat:r.part.cat,
-                d:r.qty, a:undo[undo.length-1].was, b:r.part.qty});
-      } else {
-        const rec = {id: 1+db.parts.reduce((m,p)=>Math.max(m,p.id),0),
-                     cat: db.categories[0]||"Uncategorised", lcsc:r.lcsc.toUpperCase(), mpn:r.mpn,
-                     val:"", pkg:"", mfr:"", qty:r.qty, min:null, box:"", desc:"", src:"order"};
-        if(!db.categories.includes(rec.cat)) db.categories.push(rec.cat);
-        db.parts.push(rec);
-        undo.push({p:rec, isNew:true});
-        logAdd({k:"add", id:rec.id, mpn:rec.mpn, lcsc:rec.lcsc, cat:rec.cat, b:rec.qty});
-      }
-    });
-    const added = list.filter(r=>!r.part).length;
+    const r = orderReceive(list);
     ui.receive = null; ui.rcvText = ""; ui.order = null;
-    save(); render();
-    toast("Booked in "+list.length+" lines"+(added?", "+added+" new \u2014 give them a box":""), "Undo", ()=>{
-      undo.forEach(u=>{ if(u.isNew) db.parts = db.parts.filter(x=>x!==u.p); else u.p.qty = u.was; });
-      save(); render();
-    });
+    changed("Booked in "+list.length+" lines"+(r.added?", "+r.added+" new \u2014 give them a box":""), r.undo);
     return;
   }
   if(t.id==="bomToOrder"){ ui.order = buildOrder(); ui.view="order"; render(); return; }
@@ -4632,9 +4838,9 @@ document.addEventListener("click", async ev=>{
     const o = (db.pending||[]).find(x=>x.id===Number(pcx.dataset.pendcancel));
     if(!o) return;
     if(!confirm("Cancel the order of "+o.at+"?" + String.fromCharCode(10,10) + "Its "+o.lines.length+" lines go back to the shopping list.")) return;
-    db.pending = db.pending.filter(x=>x!==o);
-    ui.order = null; save(); render();
-    toast("Order cancelled", "Undo", ()=>{ db.pending.push(o); save(); render(); });
+    const r = pendingCancel(o);
+    ui.order = null;
+    changed("Order cancelled", r.undo);
     return;
   }
   const pdr = t.closest("[data-penddrop]");
@@ -4642,13 +4848,8 @@ document.addEventListener("click", async ev=>{
     const [oid,ix] = pdr.dataset.penddrop.split(":");
     const o = (db.pending||[]).find(x=>x.id===Number(oid));
     if(!o) return;
-    const gone = o.lines.splice(Number(ix),1)[0];
-    if(!o.lines.length) db.pending = db.pending.filter(x=>x!==o);
-    save(); render();
-    toast("Dropped "+(gone.mpn||gone.lcsc||"the line"), "Undo", ()=>{
-      if(!db.pending.includes(o)) db.pending.push(o);
-      o.lines.splice(Number(ix),0,gone); save(); render();
-    });
+    const r = pendingDrop(o, Number(ix));
+    changed("Dropped "+(r.gone.mpn||r.gone.lcsc||"the line"), r.undo);
     return;
   }
   const orst = t.closest("[data-ordreset]");
@@ -4688,35 +4889,8 @@ document.addEventListener("click", async ev=>{
     const ids = mg.dataset.merge.split(",").map(Number);
     const list = ids.map(findPart).filter(Boolean);
     if(list.length<2) return;
-    const snapshot = list.map(p=>({p, copy:JSON.parse(JSON.stringify(p))}));
-    const keep = list[0];
-    /* boxes become an explicit split so no quantity is invented or lost */
-    const boxes = [];
-    list.forEach(p=>{
-      partBoxes(p).forEach(tk=>{
-        const q = qtyInBox(p, tk.key)||0;
-        const e = boxes.find(b=>b.key===tk.key);
-        if(e) e.q += q; else boxes.push({key:tk.key, q:q});
-      });
-    });
-    keep.qty = list.reduce((s,p)=>s+Number(p.qty||0),0);
-    keep.box = boxes.map(b=> boxes.length>1 ? b.key+":"+Math.round(b.q) : b.key).join(" + ");
-    list.slice(1).forEach(p=>{
-      if(!keep.lcsc && p.lcsc) keep.lcsc = p.lcsc;
-      if(!keep.mfr  && p.mfr)  keep.mfr  = p.mfr;
-      if(!keep.src  && p.src)  keep.src  = p.src;
-      if(!keep.desc && p.desc) keep.desc = p.desc;
-    });
-    const gone = list.slice(1).map(p=>({p, at:db.parts.indexOf(p)}));
-    db.parts = db.parts.filter(p=>ids.indexOf(p.id)<1 || p.id===keep.id);
-    logAdd({k:"edit", id:keep.id, mpn:keep.mpn, lcsc:keep.lcsc, cat:keep.cat,
-            b:keep.qty, d:0});
-    save(); render();
-    toast("Merged into one row of "+num(keep.qty)+" — boxes "+keep.box, "Undo", ()=>{
-      snapshot.forEach(sn=>Object.assign(sn.p, sn.copy));
-      gone.sort((a,b)=>a.at-b.at).forEach(g=>db.parts.splice(Math.min(g.at, db.parts.length),0,g.p));
-      save(); render();
-    });
+    const r = partsMerge(list);
+    changed("Merged into one row of "+num(r.keep.qty)+" — boxes "+r.keep.box, r.undo);
     return;
   }
 
@@ -4755,8 +4929,9 @@ document.addEventListener("click", async ev=>{
   if(t.id==="catAdd"){
     const v = ($("#newCatField").value||"").trim();
     if(!v) return toast("Type a name first");
-    if(db.categories.includes(v)) return toast("That category already exists");
-    db.categories.push(v); save(); render(); toast("Added "+v);
+    const r = catAdd(v);
+    if(r.err) return toast(r.err);
+    changed("Added "+v);
     return;
   }
   const ren = t.closest("[data-catren]");
@@ -4769,37 +4944,29 @@ document.addEventListener("click", async ev=>{
   const mv = t.closest("[data-catmove]");
   if(mv){
     const from = mv.dataset.catmove, to = $("#moveTarget").value;
-    const moved = db.parts.filter(p=>p.cat===from);
-    moved.forEach(p=>p.cat=to);
-    ui.moveCat=null; save(); render();
-    toast(moved.length+" parts moved to "+to, "Undo", ()=>{
-      moved.forEach(p=>p.cat=from); save(); render();
-    });
+    const r = catMoveParts(from, to);
+    ui.moveCat=null;
+    changed(r.n+" parts moved to "+to, r.undo);
     return;
   }
   const csave = t.closest("[data-catsave]");
   if(csave){
     const from = csave.dataset.catsave, to = ($("#catRenameField").value||"").trim();
     if(!to) return toast("The name cannot be empty");
-    if(to!==from && db.categories.includes(to)) return toast("That category already exists");
-    db.categories = db.categories.map(c=>c===from?to:c);
-    db.parts.forEach(p=>{ if(p.cat===from) p.cat=to; });
-    if(db.catMin && db.catMin[from]!=null && to!==from){ db.catMin[to] = db.catMin[from]; delete db.catMin[from]; }
+    const r = catRename(from, to);
+    if(r.err) return toast(r.err);
     if(ui.cat===from) ui.cat = to;
-    ui.editCat=null; save(); render(); toast("Renamed to "+to);
+    ui.editCat=null;
+    changed("Renamed to "+to);
     return;
   }
   const cdel = t.closest("[data-catdel]");
   if(cdel){
     const c = cdel.dataset.catdel;
-    if(db.parts.some(p=>p.cat===c)) return toast("Move its parts out first");
-    const at = db.categories.indexOf(c);
-    db.categories = db.categories.filter(x=>x!==c);
+    const r = catDelete(c);
+    if(r.err) return toast(r.err);
     if(ui.cat===c) ui.cat="";
-    save(); render();
-    toast("Deleted the category "+c, "Undo", ()=>{
-      db.categories.splice(Math.min(at, db.categories.length), 0, c); save(); render();
-    });
+    changed("Deleted the category "+c, r.undo);
     return;
   }
   if(t.id==="overlay"){ closeEditor(); return; }
@@ -4823,12 +4990,8 @@ document.addEventListener("click", async ev=>{
                         "(empty clears it)"+(cur.length?"\n\nalready set: "+cur.join(", "):""),
                         cur.length===1?cur[0]:"");
     if(name===null) return;
-    const before = list.map(p=>({p, was:p.mfr||""}));
-    list.forEach(p=>p.mfr = name.trim());
-    logAdd({k:"edit", mpn:"("+list.length+" parts)", cat:name.trim()||"cleared manufacturer"});
-    save(); render();
-    toast((name.trim()?"Set "+name.trim()+" on ":"Cleared the manufacturer on ")+list.length+" parts", "Undo",
-      ()=>{ before.forEach(b=>b.p.mfr=b.was); save(); render(); });
+    const r = partsSetMfr(list, name.trim());
+    changed((name.trim()?"Set "+name.trim()+" on ":"Cleared the manufacturer on ")+list.length+" parts", r.undo);
     return;
   }
 
@@ -4849,13 +5012,7 @@ document.addEventListener("click", async ev=>{
   }
   if(t.id==="valApply"){
     const hits = guessValueList();
-    const before = hits.map(h=>({p:h.p, was:h.p.val||""}));
-    hits.forEach(h=>h.p.val = h.val);
-    logAdd({k:"edit", mpn:"("+hits.length+" parts)", cat:"value read from description"});
-    save(); render();
-    toast("Filled "+hits.length+" values", "Undo", ()=>{
-      before.forEach(b=>b.p.val=b.was); save(); render();
-    });
+    changed("Filled "+hits.length+" values", partsFillValues(hits).undo);
     return;
   }
   if(t.id==="valCancel"){ $("#valWork").innerHTML=""; return; }
@@ -4876,12 +5033,7 @@ document.addEventListener("click", async ev=>{
   }
   if(t.id==="mfrApply"){
     const hits = suggestMfr();
-    const before = hits.map(h=>({p:h.p, was:h.p.mfr||""}));
-    hits.forEach(h=>h.p.mfr=h.name);
-    logAdd({k:"edit", mpn:"("+hits.length+" parts)", cat:"manufacturer from part number"});
-    save(); render();
-    toast("Filled "+hits.length+" manufacturers", "Undo",
-      ()=>{ before.forEach(b=>b.p.mfr=b.was); save(); render(); });
+    changed("Filled "+hits.length+" manufacturers", partsFillMfr(hits).undo);
     return;
   }
   if(t.id==="mfrCancel"){ $("#mfrWork").innerHTML=""; return; }
@@ -4902,11 +5054,9 @@ document.addEventListener("click", async ev=>{
   if(t.id==="mfrDoRename"){
     const from = $("#mfrFrom").value, to = ($("#mfrTo").value||"").trim();
     if(!to) return toast("Type the new name");
-    const hit = db.parts.filter(p=>(p.mfr||"")===from);
-    hit.forEach(p=>p.mfr=to);
+    const r = mfrRename(from, to);
     if(ui.mfr===from) ui.mfr=to;
-    save(); render();
-    toast(hit.length+" parts moved to "+to, "Undo", ()=>{ hit.forEach(p=>p.mfr=from); save(); render(); });
+    changed(r.n+" parts moved to "+to, r.undo);
     return;
   }
 
@@ -4919,22 +5069,12 @@ document.addEventListener("click", async ev=>{
   const cUp = t.closest("[data-catup]"), cDn = t.closest("[data-catdn]");
   if(cUp || cDn){
     const name = (cUp||cDn).dataset[cUp?"catup":"catdn"];
-    const a = db.categories, i = a.indexOf(name), j = i + (cUp?-1:1);
-    if(i<0 || j<0 || j>=a.length) return;
-    a[i] = a[j]; a[j] = name;
-    save(); render();
+    if(catShift(name, cUp?-1:1)) changed();
     return;
   }
   if(t.id==="catSortAz" || t.id==="catSortUse"){
-    const was = db.categories.slice();
-    if(t.id==="catSortAz") db.categories.sort((x,y)=>x.localeCompare(y));
-    else {
-      const n = c => db.parts.filter(p=>p.cat===c).length;
-      db.categories.sort((x,y)=> n(y)-n(x) || x.localeCompare(y));
-    }
-    save(); render();
-    toast(t.id==="catSortAz"?"Categories sorted A to Z":"Fullest categories first", "Undo",
-      ()=>{ db.categories = was; save(); render(); });
+    const r = catSort(t.id==="catSortUse");
+    changed(t.id==="catSortAz"?"Categories sorted A to Z":"Fullest categories first", r.undo);
     return;
   }
 
@@ -4969,10 +5109,10 @@ document.addEventListener("click", async ev=>{
   if(ct || t.id==="confTakeAll"){
     const list = ui.conflicts || [];
     const pick = ct ? [list[Number(ct.dataset.conftake)]] : list.slice();
-    pick.forEach(x=>{ const p = x && findPart(x.id); if(p) p[x.k] = x.theirs; });
+    conflictsTake(pick);
     ui.conflicts = list.filter(x=>pick.indexOf(x)<0);
     if(!ui.conflicts.length) ui.conflicts = null;
-    save(); render(); toast(pick.length+" field"+(pick.length>1?"s":"")+" set to GitHub's value");
+    changed(pick.length+" field"+(pick.length>1?"s":"")+" set to GitHub's value");
     return;
   }
   if(t.id==="confKeep"){ ui.conflicts = null; render(); return; }
@@ -4981,13 +5121,9 @@ document.addEventListener("click", async ev=>{
   if(t.id==="lcscFindApply"){ lcscFindApply(); return; }
   if(t.id==="lcscFindCancel"){ ui.findBulk = null; render(); return; }
   if(t.id==="catMinSuggest"){
-    db.catMin = db.catMin || {};
-    const was = Object.assign({}, db.catMin);
-    const set = db.categories.filter(c=>db.catMin[c]==null);
-    set.forEach(c=>{ db.catMin[c] = suggestCatMin(c); });
-    if(!set.length) return toast("Every category already has a level");
-    save(); render();
-    toast("Set levels on "+set.length+" categories · "+db.parts.filter(isLow).length+" parts now low", "Undo", ()=>{ db.catMin = was; save(); render(); });
+    const r = catMinFill();
+    if(r.err) return toast(r.err);
+    changed("Set levels on "+r.n+" categories · "+db.parts.filter(isLow).length+" parts now low", r.undo);
     return;
   }
   if(t.id==="ghPull" || t.id==="ghPullNow"){ await ghPull(); return; }
@@ -4997,7 +5133,7 @@ document.addEventListener("click", async ev=>{
   if(t.id==="saveNow"){ clearTimeout(saveTimer); await fileWrite(); toast(fileHandle?"Saved":"No data file connected"); return; }
   if(t.id==="forgetFile"){ fileHandle=null; pendingHandle=null; await idbSet("fileHandle",null); chip(); render(); return; }
 
-  if(t.id==="clearLog"){ if(confirm("Clear the movement log?")){ db.log=[]; save(); render(); } return; }
+  if(t.id==="clearLog"){ if(confirm("Clear the movement log?")){ logClear(); changed(); } return; }
 
   if(t.id==="connect"){
     try{
@@ -5066,18 +5202,10 @@ document.addEventListener("drop", ev=>{
   const at = catDropAt(ev);
   if(!at) return;
   ev.preventDefault();
-  const a = db.categories, moved = catDrag;
-  const from = a.indexOf(moved);
+  const moved = catDrag;
   catDrag = null; catDropMarks();
-  if(from < 0) return;
-  const was = a.slice();
-  a.splice(from, 1);
-  const to = a.indexOf(at.row.dataset.catrow);
-  if(to < 0){ db.categories = was; return; }
-  a.splice(at.below ? to+1 : to, 0, moved);
-  if(a.join(" ")===was.join(" ")) return;   /* landed where it began */
-  save(); render();
-  toast(moved+" moved", "Undo", ()=>{ db.categories = was; save(); render(); });
+  const r = catMoveTo(moved, at.row.dataset.catrow, at.below);
+  if(r) changed(moved+" moved", r.undo);
 });
 
 document.addEventListener("dragend", ()=>{ catDrag = null; catDropMarks(); });
@@ -5089,7 +5217,7 @@ document.addEventListener("input", ev=>{
   if(ev.target.classList && ev.target.classList.contains("pendbox")){
     const o = (db.pending||[]).find(x=>x.id===Number(ev.target.dataset.o));
     const l = o && o.lines[Number(ev.target.dataset.i)];
-    if(l){ l.box = ev.target.value.trim().toUpperCase(); save(); }
+    if(l){ pendingLineBox(l, ev.target.value); save(); }
     return;
   }
   if(ev.target.classList && ev.target.classList.contains("ordqty")){
@@ -5136,8 +5264,7 @@ document.addEventListener("change", ev=>{
   }
   if(ev.target.classList && ev.target.classList.contains("catmin")){
     const c = ev.target.dataset.catmin, v = String(ev.target.value).trim();
-    db.catMin = db.catMin || {};
-    if(v==="" || !isFinite(Number(v))) delete db.catMin[c]; else db.catMin[c] = Math.max(0, Math.floor(Number(v)));
+    catMinSet(c, v);
     save(); renderRail();
     toast(v==="" ? c+": back to the default of 2" : c+": alert at "+db.catMin[c]);
     return;
