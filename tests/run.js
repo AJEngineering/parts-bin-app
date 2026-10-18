@@ -302,6 +302,21 @@ function writeY4m(file, rows){
   });
   check("a row shows its category, and clicking it filters to that category and back",
         ct.text === ct.cat && ct.on === ct.cat && ct.same && ct.off === "" && !ct.open, ct);
+  const bv = await page.evaluate(() => {
+    const b = [...new Set(db.parts.map(x => x.box).filter(Boolean))]
+      .find(k => db.parts.filter(x => x.box === k && Number(x.qty) > 0).length > 1);
+    const inBox = db.parts.filter(x => x.box === b), saved = inBox.map(x => x.price);
+    inBox.forEach(x => x.price = null); inBox[0].price = 0.25; inBox[1].price = 1.1;
+    ui.view = "parts"; ui.cat = ""; ui.box = b; render();
+    const list = filtered();
+    const want = list.filter(p => p.price != null).reduce((s, p) => s + p.price * Number(p.qty || 0), 0);
+    const unpriced = list.filter(p => p.price == null).length;
+    const text = document.querySelector(".tools .count").textContent;
+    inBox.forEach((x, i) => x.price = saved[i]); ui.box = ""; render();
+    return {text, want: "$" + want.toFixed(2), unpriced, priced: list.length - unpriced};
+  });
+  check("a box filter shows what the parts in it are worth, and how many have no price",
+        bv.priced === 2 && bv.want !== "$0.00" && bv.text.includes(bv.want) && (bv.unpriced ? bv.text.includes("(" + bv.unpriced + " unpriced)") : !/unpriced/.test(bv.text)), bv);
   const sc = await page.evaluate(() => [
     parseScan("{pbn:PICK2309120041,on:SO2309120012,pc:C25744,pm:0402WGF1002TCE,qty:100,mc:,cc:1,pdi:93118125,hp:0,wc:JS}"),
     parseScan("https://example.github.io/parts-bin-app/inventory.html#box=C7"),
