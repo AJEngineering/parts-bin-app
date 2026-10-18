@@ -289,6 +289,19 @@ function writeY4m(file, rows){
   }));
   check("a part on a saved board lists the board and how many per board", eq(ui1.used, ["Sensor board rev B:2"]), ui1.used);
   check("its row carries the tag", ui1.row);
+  const ct = await page.evaluate(() => {
+    ui.view = "parts"; ui.cat = ""; render();
+    const p = db.parts.find(x => x.cat);
+    const tag = document.querySelector('.row[data-id="' + p.id + '"] .cattag');
+    const text = tag && tag.textContent;
+    tag.click();
+    const on = ui.cat, rows = [...document.querySelectorAll(".row")].map(r => findPart(r.dataset.id).cat);
+    document.querySelector('.row .cattag').click();
+    const off = ui.cat;
+    return {cat: p.cat, text, on, same: rows.every(c => c === p.cat), off, open: !document.getElementById("overlay").hidden};
+  });
+  check("a row shows its category, and clicking it filters to that category and back",
+        ct.text === ct.cat && ct.on === ct.cat && ct.same && ct.off === "" && !ct.open, ct);
   const sc = await page.evaluate(() => [
     parseScan("{pbn:PICK2309120041,on:SO2309120012,pc:C25744,pm:0402WGF1002TCE,qty:100,mc:,cc:1,pdi:93118125,hp:0,wc:JS}"),
     parseScan("https://example.github.io/parts-bin-app/inventory.html#box=C7"),
