@@ -101,6 +101,10 @@ main.solo{grid-template-columns:1fr}   /* About: no rail, so no empty column */
 /* ---------- part rows: printed bin labels ---------- */
 .tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .count{font-family:var(--mono);font-size:12px;color:var(--ink2)}
+.count .worth{display:inline-block;margin-left:4px;padding:2px 8px;border:1.5px solid var(--ink);border-radius:2px;
+              color:var(--ink);font-size:14px;font-weight:700}
+.count .worth small{font-size:11px;font-weight:400;color:var(--ink2)}
+.count .worth.none{border-style:dashed;border-color:var(--ink3);color:var(--ink3);font-size:12px;font-weight:400}
 .grow{flex:1}
 select.sel{border:1px solid var(--rule);background:var(--card);padding:5px 8px;font-family:var(--mono);
            font-size:12px;border-radius:2px}
@@ -2983,8 +2987,8 @@ function viewParts(){
   const val  = stockValue(list), unpriced = val.parts-val.priced;
   const head = `<div class="tools">
       <span class="count">${list.length} of ${db.parts.length} parts · ${num(pcs)} pcs${val.priced
-        ?` · <span class="worth" title="${val.priced} of ${val.parts} parts carry a price">$${val.sum.toFixed(2)}${unpriced?` (${unpriced} unpriced)`:""}</span>`
-        :val.parts?` · <span class="worth" title="none of these parts carries a price yet - Data, Read parts off LCSC fills them in">no prices</span>`:""}</span>
+        ?` <span class="worth" title="${val.priced} of ${val.parts} parts carry a price">$${val.sum.toFixed(2)}${unpriced?` <small>(${unpriced} unpriced)</small>`:""}</span>`
+        :val.parts?` <span class="worth none" title="none of these parts carries a price yet - Data, Read parts off LCSC fills them in">no prices</span>`:""}</span>
       ${ui.box?`<button class="chip on" data-clear="box" title="remove this filter">box ${ui.box} ✕</button>`:""}
       ${ui.cat?`<button class="chip on" data-clear="cat" title="remove this filter">${esc(ui.cat)} ✕</button>`:""}
       ${ui.mfr?`<button class="chip on" data-clear="mfr" title="remove this filter">${esc(ui.mfr)} ✕</button>`:""}
