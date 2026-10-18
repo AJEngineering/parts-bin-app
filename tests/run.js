@@ -312,9 +312,12 @@ function writeY4m(file, rows){
     const want = list.filter(p => p.price != null).reduce((s, p) => s + p.price * Number(p.qty || 0), 0);
     const unpriced = list.filter(p => p.price == null).length;
     const text = document.querySelector(".tools .count").textContent;
+    inBox.forEach(x => x.price = null); render();
+    const none = document.querySelector(".tools .count").textContent;
     inBox.forEach((x, i) => x.price = saved[i]); ui.box = ""; render();
-    return {text, want: "$" + want.toFixed(2), unpriced, priced: list.length - unpriced};
+    return {none, text, want: "$" + want.toFixed(2), unpriced, priced: list.length - unpriced};
   });
+  check("a box with no priced parts says so instead of showing nothing", /no prices/.test(bv.none) && !/\$/.test(bv.none), bv.none);
   check("a box filter shows what the parts in it are worth, and how many have no price",
         bv.priced === 2 && bv.want !== "$0.00" && bv.text.includes(bv.want) && (bv.unpriced ? bv.text.includes("(" + bv.unpriced + " unpriced)") : !/unpriced/.test(bv.text)), bv);
   const sc = await page.evaluate(() => [
