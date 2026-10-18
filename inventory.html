@@ -101,6 +101,10 @@ main.solo{grid-template-columns:1fr}   /* About: no rail, so no empty column */
 /* ---------- part rows: printed bin labels ---------- */
 .tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .count{font-family:var(--mono);font-size:12px;color:var(--ink2)}
+.count .worth{display:inline-block;margin-left:4px;padding:2px 8px;border:1.5px solid var(--ink);border-radius:2px;
+              color:var(--ink);font-size:14px;font-weight:700}
+.count .worth small{font-size:11px;font-weight:400;color:var(--ink2)}
+.count .worth.none{border-style:dashed;border-color:var(--ink3);color:var(--ink3);font-size:12px;font-weight:400}
 .grow{flex:1}
 select.sel{border:1px solid var(--rule);background:var(--card);padding:5px 8px;font-family:var(--mono);
            font-size:12px;border-radius:2px}
@@ -388,7 +392,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "2.4.2";
+const APP_VERSION = "2.4.3";
 const REPO_URL = "https://github.com/AJEngineering/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -1278,6 +1282,14 @@ function bomCost(text){
   rows.forEach(r=>{ const m = matchBom(r);
     if(m.p && m.p.price!=null && isFinite(m.p.price)){ sum += m.p.price*(r.need||1); priced++; } });
   return {sum, priced, lines: rows.length};
+}
+
+/* what a set of parts on the shelf is worth (unit price x qty) - parts with
+   no price are counted so the figure can say how much of it is known       */
+function stockValue(parts){
+  let sum = 0, priced = 0;
+  parts.forEach(p=>{ if(p.price!=null && isFinite(p.price)){ sum += p.price*Number(p.qty||0); priced++; } });
+  return {sum, priced, parts: parts.length};
 }
 
 /* boards buildable from stock, for a saved BOM, without touching ui state */
@@ -2972,8 +2984,11 @@ function viewParts(){
   if(!db.parts.length) return viewFirstRun();
   const list = filtered();
   const pcs  = list.reduce((s,p)=>s+Number(p.qty||0),0);
+  const val  = stockValue(list), unpriced = val.parts-val.priced;
   const head = `<div class="tools">
-      <span class="count">${list.length} of ${db.parts.length} parts · ${num(pcs)} pcs</span>
+      <span class="count">${list.length} of ${db.parts.length} parts · ${num(pcs)} pcs${val.priced
+        ?` <span class="worth" title="${val.priced} of ${val.parts} parts carry a price">$${val.sum.toFixed(2)}${unpriced?` <small>(${unpriced} unpriced)</small>`:""}</span>`
+        :val.parts?` <span class="worth none" title="none of these parts carries a price yet - Data, Read parts off LCSC fills them in">no prices</span>`:""}</span>
       ${ui.box?`<button class="chip on" data-clear="box" title="remove this filter">box ${ui.box} ✕</button>`:""}
       ${ui.cat?`<button class="chip on" data-clear="cat" title="remove this filter">${esc(ui.cat)} ✕</button>`:""}
       ${ui.mfr?`<button class="chip on" data-clear="mfr" title="remove this filter">${esc(ui.mfr)} ✕</button>`:""}
@@ -3453,8 +3468,7 @@ function viewData(){
   const lcscCoded = db.parts.filter(p=>lcscCode(p.lcsc)).length;
   const gaps = lcscGapList().length;
   const fsa = !!window.showSaveFilePicker;
-  const pricedParts = db.parts.filter(p=>p.price!=null);
-  const priced = pricedParts.length, worth = pricedParts.reduce((s,p)=>s+p.price*Number(p.qty||0),0);
+  const {sum:worth, priced} = stockValue(db.parts);
   const noCode = lcscNoCodeList().length;
   return `<div class="stats">
       <div class="stat"><b>${db.parts.length}</b><span class="lab">parts</span></div>
