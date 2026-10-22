@@ -320,6 +320,34 @@ function writeY4m(file, rows){
   check("a box with no priced parts says so instead of showing nothing", /no prices/.test(bv.none) && !/\$/.test(bv.none), bv.none);
   check("a box filter shows what the parts in it are worth, and how many have no price",
         bv.priced === 2 && bv.want !== "$0.00" && bv.text.includes(bv.want) && (bv.unpriced ? bv.text.includes("(" + bv.unpriced + " unpriced)") : !/unpriced/.test(bv.text)), bv);
+  const own = await page.evaluate(async () => {
+    const shot = async (w, h) => {
+      const c = document.createElement("canvas"); c.width = w; c.height = h;
+      const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0, 0, w, h);
+      x.fillStyle = "#c00"; x.fillRect(w / 4, h / 3, w / 2, h / 3);
+      return new File([await new Promise(r => c.toBlob(r, "image/png"))], "part.png", {type: "image/png"});
+    };
+    const until = async f => { for (let i = 0; i < 100 && !f(); i++) await new Promise(r => setTimeout(r, 50)); return f(); };
+    openEditor(findPart(1));
+    const imgIn = document.getElementById("sheet").elements.img; imgIn.value = "";
+    const dt = new DataTransfer(); dt.items.add(await shot(600, 300));
+    const fi = document.getElementById("imgFile"); fi.files = dt.files; fi.dispatchEvent(new Event("change"));
+    await until(() => /^images\/P/.test(imgIn.value));
+    const picked = imgIn.value;
+    const bmp = await createImageBitmap(await idbGet("img:" + picked));
+    await until(() => !document.getElementById("imgPrev").hidden);
+    const prev = !document.getElementById("imgPrev").hidden;
+    const cd = new DataTransfer(); cd.items.add(await shot(200, 400));
+    imgIn.dispatchEvent(new ClipboardEvent("paste", {clipboardData: cd, bubbles: true, cancelable: true}));
+    await until(() => imgIn.value !== picked);
+    const pasted = imgIn.value, queued = imgUnpushed.has(picked) && imgUnpushed.has(pasted);
+    closeEditor();
+    return {picked, size: bmp.width + "x" + bmp.height, prev, pasted, queued};
+  });
+  check("a picture chosen from a file is squared, saved under images/ and shown",
+        /^images\/P\w+\.(webp|jpg)$/.test(own.picked) && own.size === "256x256" && own.prev, own);
+  check("a picture pasted into the field is saved the same way and queued for the repository",
+        /^images\/P\w+\.(webp|jpg)$/.test(own.pasted) && own.pasted !== own.picked && own.queued, own);
   const sc = await page.evaluate(() => [
     parseScan("{pbn:PICK2309120041,on:SO2309120012,pc:C25744,pm:0402WGF1002TCE,qty:100,mc:,cc:1,pdi:93118125,hp:0,wc:JS}"),
     parseScan("https://example.github.io/parts-bin-app/inventory.html#box=C7"),

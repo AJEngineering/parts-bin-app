@@ -143,7 +143,12 @@ drawn at the same fill into a 256×256 square on white, and saved as WebP (JPEG 
 
 The part itself only carries the path in its `img` field. Without GitHub sync the pictures stay in
 the browser that fetched them; **Data → Pictures** counts the ones not yet pushed and pushes them once
-sync is set up. A part with no LCSC code can take any image link pasted into its **Picture** field.
+sync is set up.
+
+A part LCSC does not sell can have a picture of your own: **Choose file** or **Take photo** (the
+camera, on a phone) under the **Picture** field, or paste a screenshot straight into the field. It is
+squared and saved the same way, as `images/P<time>.webp`. A plain image link pasted into the field
+also works, but it is only shown from where it is, not saved.
 
 The photo is fetched through the same relays as the lookup. A relay of your own needs
 `assets.lcsc.com` on its list of allowed hosts — it is in the code below.
