@@ -148,6 +148,8 @@ tr[data-catrow].dropbelow td{box-shadow:inset 0 -2px 0 var(--kapton)}
             text-align:center;line-height:1.2;padding:2px}
 .imgprev{width:160px;height:160px;object-fit:contain;background:#fff;border:1px solid var(--rule);
          border-radius:2px;display:block;margin-top:6px}
+.imgown{display:flex;gap:6px;margin-top:6px}
+.imgown .btn{padding:4px 10px;font-size:11px}
 .line1{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
 .pn{font-family:var(--mono);font-size:13.5px;font-weight:600}
 .lcsc{font-family:var(--mono);font-size:11px;color:#fff;background:var(--ink2);padding:1px 5px;border-radius:2px}
@@ -392,7 +394,7 @@ const SEED = {version:1, categories:[], boxes:[], parts:[], log:[], boms:[]};
    browser looks under, and renaming them would hide every inventory already
    saved on a machine that has been using this page.                         */
 const KEY = "parts-bin-v1";
-const APP_VERSION = "2.4.3";
+const APP_VERSION = "2.4.4";
 const REPO_URL = "https://github.com/AJEngineering/parts-bin-app";
 
 /* ------------------------------------------------------------------ state */
@@ -2027,6 +2029,19 @@ async function imgKeep(path, blob, unpushed){
 async function imgSave(code, url){
   const blob = await imgSquare(await imgDownload(url));
   const path = IMG_DIR + code + (blob.type==="image/webp" ? ".webp" : ".jpg");
+  await imgKeep(path, blob, true);
+  return path;
+}
+
+/* A picture of the owner's own - a file, a phone photo, a pasted screenshot -
+   for a part LCSC does not sell. Same square, same store; named by the moment
+   it was taken, since a new part has no number yet and an MPN can be anything. */
+async function imgSaveFile(file){
+  let bmp;
+  try{ bmp = await createImageBitmap(file); }
+  catch(e){ throw new Error("that file is not a picture this browser can read"); }
+  const blob = await imgSquare(bmp);
+  const path = IMG_DIR + "P" + Date.now().toString(36) + (blob.type==="image/webp" ? ".webp" : ".jpg");
   await imgKeep(path, blob, true);
   return path;
 }
@@ -4124,7 +4139,12 @@ function openEditor(p, seed){
         <input name="ds" value="${esc(d.ds||"")}" placeholder="filled in by the LCSC lookup — or paste one" spellcheck="false">
         <small>${d.ds?`<a class="linkish" target="_blank" rel="noreferrer" href="${esc(d.ds)}">open it</a>`:"&nbsp;"}</small></div>
       <div class="f wide"><label class="lab">Picture</label>
-        <input name="img" value="${esc(d.img||"")}" placeholder="fetched with the LCSC lookup — or paste a link" spellcheck="false">
+        <input name="img" value="${esc(d.img||"")}" placeholder="fetched with the LCSC lookup — or paste a link or a picture" spellcheck="false">
+        <div class="imgown">
+          <button type="button" class="btn ghost" id="imgPick">Choose file</button>
+          <button type="button" class="btn ghost" id="imgShoot">Take photo</button>
+          <input type="file" id="imgFile" accept="image/*" hidden>
+          <input type="file" id="imgCam" accept="image/*" capture="environment" hidden></div>
         <small id="imgNote">&nbsp;</small>
         <img class="imgprev" id="imgPrev" alt="" hidden></div>
       ${!isNew && usedIn(d).length ? `<div class="f wide"><label class="lab">Used in</label><div class="usedin">${usedIn(d).map(u=>
@@ -4239,6 +4259,27 @@ function openEditor(p, seed){
   /* a value written by the lookup fires no event of its own */
   imgIn.addEventListener("lcsc", imgShow);
   imgShow();
+  /* a picture of the owner's own replaces whatever was there - they chose it */
+  const imgOwn = async file=>{
+    const note = $("#imgNote");
+    if(!file || !/^image\//.test(file.type)){ note.textContent = "that is not a picture"; return; }
+    note.textContent = "Saving the picture…";
+    try{
+      const path = await imgSaveFile(file);
+      if(!document.body.contains(imgIn)) return;
+      imgIn.value = path; imgIn.classList.add("fresh"); imgIn.dispatchEvent(new Event("lcsc"));
+      imgPushNote(path);
+    }catch(e){ if(document.body.contains(note)) note.textContent = e.message; }
+  };
+  $("#imgPick").onclick  = ()=>$("#imgFile").click();
+  $("#imgShoot").onclick = ()=>$("#imgCam").click();
+  for(const id of ["#imgFile","#imgCam"])
+    $(id).onchange = e=>{ const f = e.target.files[0]; e.target.value = ""; if(f) imgOwn(f); };
+  /* a screenshot copied off a datasheet pastes straight into the field */
+  imgIn.addEventListener("paste", e=>{
+    const f = [...(e.clipboardData?e.clipboardData.files:[])].find(x=>/^image\//.test(x.type));
+    if(f){ e.preventDefault(); imgOwn(f); }
+  });
 
   const first = $("#sheet input"); if(first) first.focus();
   /* opened from a scanned bag: read the rest of the part off LCSC straight away */
@@ -4359,13 +4400,19 @@ async function imgFill(r, form){
     const path = await imgSave(r.productCode, src);
     if(!document.body.contains(el) || String(el.value||"").trim()) return;   /* closed or typed over meanwhile */
     el.value = path; el.classList.add("fresh"); el.dispatchEvent(new Event("lcsc"));
-    let msg = "Saved as "+path;
-    if(ghReady()){
-      try{ await imgPush(); msg += " · pushed to "+gh.repo; }
-      catch(e){ msg += " · push failed ("+e.message+"), kept here for the next one"; }
-    } else msg += " · in this browser only until GitHub sync is set up";
-    if(note && document.body.contains(note)) note.textContent = msg;
+    await imgPushNote(path);
   }catch(e){ if(note && document.body.contains(note)) note.textContent = e.message; }
+}
+
+/* push a picture just saved and say where it went, under the Picture field */
+async function imgPushNote(path){
+  let msg = "Saved as "+path;
+  if(ghReady()){
+    try{ await imgPush(); msg += " · pushed to "+gh.repo; }
+    catch(e){ msg += " · push failed ("+e.message+"), kept here for the next one"; }
+  } else msg += " · in this browser only until GitHub sync is set up";
+  const note = $("#imgNote");
+  if(note && document.body.contains(note)) note.textContent = msg;
 }
 
 function download(name, data, type){
