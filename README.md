@@ -152,7 +152,10 @@ also works, but it is only shown from where it is, not saved.
 
 A part with no picture at all is drawn from its **package**: a 0603 as a small body between two
 tinned ends, an SOIC-8 with its legs, a TO-220 with its tab, a can, a crystal, a screw terminal, and
-so on, roughly to scale within its family and coloured by category. Nothing is saved; a package name
+so on, roughly to scale within its family and coloured by category. Parts that are not a package
+shape (SMA jacks, potentiometers and trimmers, pin and box headers, coin cells and holders, cells and
+pouches, buzzers, character LCDs, OLEDs, TFTs, microSD sockets) are known by category, part number
+and description. Nothing is saved; a package name
 it cannot read (`SMD`, empty) shows the name as before.
 
 The photo is fetched through the same relays as the lookup. A relay of your own needs

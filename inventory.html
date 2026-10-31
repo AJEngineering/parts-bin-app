@@ -2130,7 +2130,8 @@ function imgResolve(path){
 function imgDead(el){
   const t = el.parentNode;
   if(t && t.classList.contains("thumb")){
-    const d = pkgSvg(el.dataset.pkg, el.dataset.pcat);
+    const row = el.closest(".row"), p = row && findPart(row.dataset.id);
+    const d = pkgSvg(el.dataset.pkg, el.dataset.pcat, 0, p && pkgHint(p));
     if(d){ t.classList.add("drawn"); t.innerHTML = d; }
     else { t.classList.add("none"); t.textContent = el.dataset.pkg||""; }
   }
@@ -2839,11 +2840,6 @@ function pkgTerminal(ways){
   }
   return s;
 }
-function pkgHeader(){
-  let s = svgRect(14, 38, 72, 24, PKG_EPOXY, 1);
-  for(let i=0;i<4;i++) s += svgRect(14+18*i+6, 44, 6, 12, PKG_GOLD);
-  return s;
-}
 function pkgLed(d){
   const r = d >= 5 ? 16 : 12;
   return svgLegs(50-r, 2*r, 68, 2, 24, 2.5) + svgRect(50-r-3, 62, 2*r+6, 7, "#d94a3a", 1) +
@@ -2862,11 +2858,121 @@ function pkgTact(){
          svgRect(14,64,8,10,PKG_LEAD) + svgRect(78,64,8,10,PKG_LEAD) + svgCirc(50,50,17,"#55585e") + svgCirc(50,50,13,"#2a2b2e");
 }
 
+/* SMA RF jack: a square gold base, straight up or with its barrel turned 90° */
+function pkgSmaJack(ra){
+  const G = "#d4a72c", D = "#b0861a";
+  if(ra){
+    let t = "";
+    for(let x=60;x<86;x+=5) t += svgRect(x, 39, 1.6, 22, D);
+    return svgLegs(14, 30, 64, 2, 14, 4, false, G) + svgRect(10, 34, 34, 32, G, 2) + svgRect(44, 30, 14, 40, D, 2) +
+           svgRect(58, 38, 30, 24, G, 2) + t + svgRect(86, 43, 4, 14, "#f1efe6");
+  }
+  return svgRect(18,18,64,64,G,3) + svgCirc(24,24,4,D) + svgCirc(76,24,4,D) + svgCirc(24,76,4,D) + svgCirc(76,76,4,D) +
+         `<path d="M50 22 L74 36 V64 L50 78 L26 64 V36 Z" fill="${D}"/>` + svgCirc(50,50,17,G) + svgCirc(50,50,11,"#f1efe6") + svgCirc(50,50,3.5,G);
+}
+/* trimmer from above: blue square, white dial with its slot; a panel pot
+   as its round can, knurled shaft and three lugs                          */
+function pkgTrimmer(){
+  return svgRect(18,18,64,64,"#2d5fa8",4) + svgCirc(50,50,22,"#f1efe6") + svgRect(48,32,4,36,"#9aa0a8") + svgRect(32,48,36,4,"#9aa0a8");
+}
+function pkgPot(){
+  return svgLegs(26, 48, 74, 3, 20, 5) + svgCirc(50,46,34,"#c7ccd3") + svgCirc(50,46,17,"#8a8e95") +
+         `<circle cx="50" cy="46" r="15" fill="none" stroke="#5f636a" stroke-width="3" stroke-dasharray="2 2"/>` + svgRect(48,31,4,30,"#5f636a");
+}
+/* pin header: rows of gold pins in black plastic, a shroud for a box header,
+   square holes for a female one                                           */
+function pkgHeaderN(rows, cols, box, female){
+  const r = Math.max(1, Math.min(rows||1, 2)), n = Math.max(2, Math.min(cols||4, 10));
+  const p = Math.min(16, 84/n), W = p*n, H = p*r, x = 50-W/2, y = 50-H/2;
+  let s = box ? svgRect(x-5, y-6, W+10, H+12, PKG_EPOXY, 2) + svgRect(50-7, y+H+2, 14, 4, "#55585e") : "";
+  s += svgRect(x, y, W, H, female ? PKG_EPOXY : "#1e1f22", 1);
+  for(let j=0;j<r;j++) for(let i=0;i<n;i++)
+    s += female ? svgRect(x+p*i+p*0.3, y+p*j+p*0.3, p*0.4, p*0.4, "#000")
+                : svgRect(x+p*i+p*0.32, y+p*j+p*0.32, p*0.36, p*0.36, PKG_GOLD);
+  return s;
+}
+/* batteries: a coin cell (in its holder when it is one), a cylinder, a pouch */
+function pkgCoin(holder){
+  const plus = svgRect(46,34,8,24,"#8a8e95") + svgRect(38,42,24,8,"#8a8e95");
+  return (holder ? svgRect(8,24,84,52,PKG_EPOXY,4) + svgRect(2,40,10,20,PKG_TIN) + svgRect(88,40,10,20,PKG_TIN) : "") +
+         svgCirc(50,50,holder?30:36,"#d3d7dc") + svgCirc(50,50,holder?24:29,"#c3c8ce") + plus;
+}
+function pkgCell(){
+  return svgRect(10,32,74,36,"#2f6fb3",6) + svgRect(84,42,8,16,PKG_TIN,2) + svgRect(10,32,12,36,"#c7ccd3",4) +
+         svgRect(66,47,10,6,"#fff") + svgRect(68,45,6,10,"#fff");
+}
+function pkgPouch(){
+  return svgRect(12,30,70,46,"#c3c8ce",4) + svgRect(12,30,70,10,"#9aa0a8",3) + svgRect(26,48,42,16,"#2f6fb3",2) +
+         svgRect(82,40,14,3,"#d94a3a") + svgRect(82,46,14,3,"#1e1f22");
+}
+function pkgBuzzer(){
+  return svgCirc(50,50,38,"#1e1f22") + svgCirc(50,50,30,"#2e3034") + svgCirc(50,50,6,"#55585e") +
+         svgRect(22,24,10,3,"#f1efe6") + svgRect(25.5,20.5,3,10,"#f1efe6");
+}
+/* displays: a character LCD on its green board, an OLED, a colour TFT */
+function pkgCharLcd(){
+  let s = svgRect(4,18,92,64,"#2f8f4e",2) + svgRect(10,30,80,40,"#1e1f22",1) + svgRect(14,34,72,32,"#9cbf3b");
+  for(let j=0;j<2;j++) for(let i=0;i<16;i++) s += svgRect(16+i*4.4, 38+j*13, 3.6, 10, "#86a832");
+  for(let i=0;i<16;i++) s += svgCirc(14+i*4.8, 23.5, 1.4, PKG_GOLD);
+  return s;
+}
+function pkgOled(){
+  let s = svgRect(16,14,68,72,"#1f4e8c",3) + svgRect(20,30,60,40,"#0b0c0e");
+  for(let i=0;i<4;i++) s += svgCirc(38+i*8, 21, 2, PKG_GOLD);
+  return s + svgRect(26,38,36,4,"#5fd3f0") + svgRect(26,48,46,4,"#5fd3f0") + svgRect(26,58,24,4,"#f0d35f");
+}
+function pkgTft(){
+  let s = svgRect(6,14,88,72,"#b3262e",3) + svgRect(18,20,72,60,"#0b0c0e",2) + svgRect(22,24,64,52,"#1b3b6f") +
+          svgRect(22,24,64,18,"#2c6bb3") + svgCirc(70,60,9,"#e8a33d") + svgRect(30,54,22,14,"#3fae6a");
+  for(let i=0;i<7;i++) s += svgCirc(11, 22+i*9, 1.8, PKG_GOLD);
+  return s;
+}
+/* microSD socket: the metal shell, a card part way in, its contacts */
+function pkgSd(){
+  let s = svgRect(18,10,64,62,"#c7ccd3",2) + svgRect(24,16,52,4,"#aeb3ba") + svgRect(24,26,52,4,"#aeb3ba");
+  s += `<path d="M30 52 H66 L70 56 V92 H30 Z" fill="#1e1f22"/>`;
+  for(let i=0;i<8;i++) s += svgRect(22+i*7, 4, 4, 8, PKG_GOLD);
+  return s + svgRect(36,74,22,8,"#3b3d42");
+}
+
+/* Things that are not a package shape at all - a jack, a display, a
+   battery - are known by their category and by what the part is called
+   (hint: its part number, value and description), checked before the name
+   of the package, which for these is often just "Plugin" or nothing.      */
+function pkgThing(P, c, H){
+  const T = P+" "+H, C = c.toUpperCase();
+  if(/\bSMA[- ]?(90|KWE|KHD|KE|K|JE|J|RA)\b|\bSMA\b.*(90|RIGHT|CONNECTOR|JACK|FEMALE|MALE|50\s*OHM)/.test(T) ||
+     (/\bRF\b|ANTENNA|COAX|CONNECTOR|TERMINAL/.test(C) && /\bSMA\b/.test(T)))
+    return {kind:"sma", body:pkgSmaJack(/90|RIGHT|\bRA\b|KWE|KHD/.test(T))};
+  if(/POTENTIOM|TRIMPOT|TRIMMER|RHEOSTAT|VARIABLE RESIST/.test(C+" "+T) || /^(3296|3362|3386|3266|RV09|WH148|RK09)/.test(P))
+    return {kind:"pot", body:/3296|3362|3386|3266|TRIM|SMD|CERMET/.test(T) ? pkgTrimmer() : pkgPot()};
+  if(/\bBUZZER|BEEPER|PIEZO|SOUNDER/.test(C+" "+T)) return {kind:"buzzer", body:pkgBuzzer()};
+  if(/MICRO\s*SD|\bTF[- ]?(CARD|SOCKET)|\bSD[- ]?CARD|\bSD\s*SOCKET/.test(C+" "+T)) return {kind:"sd", body:pkgSd()};
+  if(/\bLCD|OLED|\bTFT|\bHMI\b|GLCD|DISPLAY/.test(C+" "+T) && !/DRIVER/.test(C)){
+    if(/16\s*X\s*2|20\s*X\s*4|1602|2004|CHARACTER|HD44780/.test(T)) return {kind:"display", body:pkgCharLcd()};
+    if(/OLED|SSD13|SH110/.test(T)) return {kind:"display", body:pkgOled()};
+    return {kind:"display", body:pkgTft()};
+  }
+  if(/BATTER|CELL HOLDER|COIN/.test(C) && !/MANAGE|CHARG|PROTECT|BMS|BALANC|\bIC\b/.test(C)){
+    if(/CR\d{4}|LIR\d{4}|COIN|BH\d/.test(T) || /HOLDER/.test(C)) return {kind:"battery", body:pkgCoin(/HOLDER|BH\d/.test(C+" "+T))};
+    if(/18650|21700|14500|\bAAA?\b|\b2[37]A\b|NI-?MH|ALKALINE/.test(T)) return {kind:"battery", body:pkgCell()};
+    return {kind:"battery", body:pkgPouch()};
+  }
+  if(/HEADER|\bIDC\b/.test(C+" "+T)){
+    const g = /(\d+)\s*[X×*]\s*(\d+)/.exec(T), k = /(\d+)\s*-?\s*P(?:IN)?S?\b/.exec(T);
+    const rows = g ? Math.min(+g[1], +g[2]) : 1, cols = g ? Math.max(+g[1], +g[2]) : k ? +k[1] : 4;
+    return {kind:"header", body:pkgHeaderN(rows, cols, /BOX|SHROUD|\bIDC\b/.test(T), /FEMALE|SOCKET/.test(T))};
+  }
+  return null;
+}
+
 /* the package name in, {kind, body} out - or null when it says nothing */
-function pkgShape(pkg, cat){
-  const raw = String(pkg||"").replace(/ /g," ").trim(), P = raw.toUpperCase();
-  const c = String(cat||""), n = (re => { const m = re.exec(P); return m ? Number(m[1]) : 0; });
+function pkgShape(pkg, cat, hint){
+  const raw = String(pkg||"").replace(/\u00a0/g," ").trim(), P = raw.toUpperCase();
+  const c = String(cat||""), H = String(hint||"").replace(/\u00a0/g," ").toUpperCase();
   let m;
+  const thing = pkgThing(P, c, H);
+  if(thing) return thing;
   if((m = /^(?:[RCL]|SMD|CHIP)?[-_ ]?(0201|0402|0603|0805|1206|1210|1812|2010|2512|402|603|805)(?![\dX.])/.exec(P))){
     const k = m[1].padStart(4,"0"); return {kind:"chip", body:pkgChip(CHIP_MM[k][0], CHIP_MM[k][1], c)};
   }
@@ -2885,8 +2991,8 @@ function pkgShape(pkg, cat){
   if((m = /^(?:H?T?SSOP|MSOP|VSSOP|QSOP|SOIC|E?SOP|SOJ|SO)-?(\d+)/.exec(P)))
     return {kind:"dual", body:pkgDual(Number(m[1]), false, /SSOP|MSOP/.test(P))};
   if((m = /^[LTP]?QFP-?(\d+)/.exec(P))) return {kind:"quad", body:pkgQuad(Number(m[1]))};
-  if((m = /^[VWU]?QFN-?(\d+)/.exec(P))) return {kind:"quad", body:pkgQuad(Number(m[1]), true)};
-  if((m = /^[VWU]?DFN-?(\d+)/.exec(P))) return {kind:"quad", body:pkgQuad(Number(m[1]), true, true)};
+  if((m = /^[A-Z]{0,2}QFN-?(\d+)/.exec(P))) return {kind:"quad", body:pkgQuad(Number(m[1]), true)};
+  if((m = /^[A-Z]{0,2}DFN-?(\d+)/.exec(P))) return {kind:"quad", body:pkgQuad(Number(m[1]), true, true)};
   if(/^(TO-?252|DPAK)/.test(P))  return {kind:"to", body:pkgDpak(false)};
   if(/^(TO-?263|D2PAK)/.test(P)) return {kind:"to", body:pkgDpak(true)};
   if(/^TO-?(220|126|251)/.test(P)) return {kind:"to", body:pkgTo220(false)};
@@ -2903,7 +3009,7 @@ function pkgShape(pkg, cat){
   /* a pitch: a screw terminal, or a pin header at 2.54 and below */
   if((m = /^(?:P\s*=\s*)?(\d+(?:\.\d+)?)\s*MM$/.exec(P))){
     const p = Number(m[1]);
-    if(/header|pin/i.test(c) || (p <= 2.54 && !/terminal|screw/i.test(c))) return {kind:"header", body:pkgHeader()};
+    if(/header|pin/i.test(c) || (p <= 2.54 && !/terminal|screw/i.test(c))) return {kind:"header", body:pkgHeaderN(1, 4)};
     return {kind:"terminal", body:pkgTerminal(2)};
   }
   /* "SMD,6.3x7.7mm", "Radial Leaded,5x11mm": a can, a power inductor or a plain block */
@@ -2928,12 +3034,15 @@ function pkgShape(pkg, cat){
   return null;
 }
 
+/* what a part is called, for the shapes that are not a package */
+const pkgHint = p => [p.mpn, p.val, p.desc].filter(Boolean).join(" ");
+
 /* the drawing itself, ready to sit where a picture would - "" when unknown */
-function pkgSvg(pkg, cat, size){
-  const s = pkgShape(pkg, cat);
+function pkgSvg(pkg, cat, size, hint){
+  const s = pkgShape(pkg, cat, hint);
   if(!s) return "";
   const px = size || 56;
-  return `<svg xmlns="http://www.w3.org/2000/svg" class="pkgsvg" data-kind="${s.kind}" viewBox="0 0 100 100" width="${px}" height="${px}" role="img" aria-label="${esc(String(pkg||""))}"><title>${esc(String(pkg||"")||"drawn from the category")} · drawn from the package</title>${s.body}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" class="pkgsvg" data-kind="${s.kind}" viewBox="0 0 100 100" width="${px}" height="${px}" role="img" aria-label="${esc(String(pkg||""))}"><title>${esc(String(pkg||"")||"drawn from the category")} · drawn, not a photo</title>${s.body}</svg>`;
 }
 
 /* ------------------------------------------------------------- QR code ---
@@ -3185,7 +3294,7 @@ function dsLink(p){
    square with its package written in it, so the column never jumps.     */
 function thumbHTML(p){
   const img = String(p.img||"").trim();
-  if(!img){ const d = pkgSvg(p.pkg, p.cat); return d ? `<div class="thumb drawn">${d}</div>` : `<div class="thumb none">${esc(p.pkg||"")}</div>`; }
+  if(!img){ const d = pkgSvg(p.pkg, p.cat, 0, pkgHint(p)); return d ? `<div class="thumb drawn">${d}</div>` : `<div class="thumb none">${esc(p.pkg||"")}</div>`; }
   const at = imgIsUrl(img) ? `src="${esc(img)}" referrerpolicy="no-referrer"` : `data-img="${esc(img)}"`;
   return `<div class="thumb"><img ${at} alt="" loading="lazy" decoding="async" width="56" height="56"
     data-pkg="${esc(p.pkg||"")}" data-pcat="${esc(p.cat||"")}" onerror="imgDead(this)"></div>`;
@@ -4507,7 +4616,8 @@ function openEditor(p, seed){
     const v = String(imgIn.value||"").trim();
     if(!v){
       /* no picture: show what the row will draw from the package instead */
-      const f = $("#sheet").elements, d = pkgSvg(f.pkg && f.pkg.value, f.cat && f.cat.value, 160);
+      const f = $("#sheet").elements, d = pkgSvg(f.pkg && f.pkg.value, f.cat && f.cat.value, 160,
+        ["mpn","val","desc"].map(k=>f[k] ? f[k].value : "").join(" "));
       imgPrev.hidden = !d;
       if(d) imgPrev.src = "data:image/svg+xml;charset=utf-8,"+encodeURIComponent(d);
       return;
@@ -4517,7 +4627,7 @@ function openEditor(p, seed){
     else imgResolve(v).then(u=>{ if(u && imgIn.value.trim()===v){ imgPrev.src = u; imgPrev.hidden = false; } else imgPrev.hidden = true; });
   };
   imgIn.addEventListener("input", imgShow);
-  for(const k of ["pkg","cat"]){ const el = $("#sheet").elements[k]; if(el){ el.addEventListener("input", imgShow); el.addEventListener("change", imgShow); } }
+  for(const k of ["pkg","cat","mpn","val","desc"]){ const el = $("#sheet").elements[k]; if(el){ el.addEventListener("input", imgShow); el.addEventListener("change", imgShow); } }
   /* a value written by the lookup fires no event of its own */
   imgIn.addEventListener("lcsc", imgShow);
   imgShow();
