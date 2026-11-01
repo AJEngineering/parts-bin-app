@@ -3034,6 +3034,23 @@ function pkgShape(pkg, cat, hint){
   return null;
 }
 
+/* The package field offers what the bin already uses, most used first, then
+   the common names this can draw - so a new part reads "0603", not "603" or
+   "0603 SMD", and its picture draws.                                        */
+const PKG_COMMON = ["0201","0402","0603","0805","1206","1210","1812","2010","2512",
+  "CASE-A_3216","CASE-B_3528","CASE-C_6032","CASE-D_7343","SOD-523","SOD-323","SOD-123","SOD-123F","SMA","SMB","SMC",
+  "SOT-23","SOT-23-5","SOT-23-6","SOT-323","SOT-363","SOT-89","SOT-223","SOIC-8","SOIC-14","SOIC-16","MSOP-8","MSOP-10",
+  "TSSOP-14","TSSOP-16","TSSOP-20","SSOP-20","DIP-8","DIP-14","DIP-16","LQFP-32","LQFP-48","LQFP-64","QFN-16","QFN-20",
+  "QFN-32","QFN-48","DFN-6","DFN-8","TO-252","TO-263","TO-220","TO-247","TO-92","DO-41","DO-15","HC-49S","SMD3225",
+  "SMD2520","LED 3MM","LED 5MM","P=2.54mm","P=3.81mm","P=5.08mm","Plugin","SMD"];
+function pkgList(){
+  const m = new Map();
+  for(const p of db.parts){ const k = String(p.pkg||"").trim(); if(k) m.set(k, (m.get(k)||0)+1); }
+  const used = [...m].sort((a,b)=> b[1]-a[1] || a[0].localeCompare(b[0])).map(x=>x[0]);
+  const seen = new Set(used.map(x=>x.toUpperCase()));
+  return used.concat(PKG_COMMON.filter(x=>!seen.has(x.toUpperCase())));
+}
+
 /* what a part is called, for the shapes that are not a package */
 const pkgHint = p => [p.mpn, p.val, p.desc].filter(Boolean).join(" ");
 
@@ -4489,7 +4506,8 @@ function openEditor(p, seed){
       <div class="f"><label class="lab">Supplier</label><input name="src" value="${esc(d.src)}" placeholder="LCSC"></div>
       <div class="lcscnote" id="lcscNote"></div>
       <div class="f"><label class="lab">Value or type</label><input name="val" value="${esc(d.val)}" placeholder="10kΩ"></div>
-      <div class="f"><label class="lab">Package</label><input name="pkg" value="${esc(d.pkg)}" placeholder="0603"></div>
+      <div class="f"><label class="lab">Package</label><input name="pkg" value="${esc(d.pkg)}" placeholder="0603" list="pkgList" autocomplete="off">
+        <datalist id="pkgList">${pkgList().map(k=>`<option value="${esc(k)}">`).join("")}</datalist></div>
       <div class="f"><label class="lab">Manufacturer</label><input name="mfr" value="${esc(d.mfr||"")}" placeholder="Murata" list="mfrList">
         <datalist id="mfrList">${mfrList().map(m=>`<option value="${esc(m.name)}">`).join("")}</datalist></div>
       <div class="f"><label class="lab">Category</label><select name="cat" id="catSel">${db.categories.map(c=>`<option${c===d.cat?" selected":""}>${esc(c)}</option>`).join("")}<option value="__new">+ new category…</option></select></div>

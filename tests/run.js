@@ -380,6 +380,17 @@ function writeY4m(file, rows){
   check("a part with no picture shows its package drawn, one with an unreadable package keeps the name",
         pk.drawn && pk.plain, pk);
   check("the editor previews the drawing when the picture field is empty", pk.shown, pk);
+  const pl = await page.evaluate(() => {
+    openEditor(findPart(1));
+    const opts = [...document.querySelectorAll("#pkgList option")].map(o => o.value);
+    const linked = document.getElementById("sheet").elements.pkg.getAttribute("list") === "pkgList";
+    closeEditor();
+    const used = [...new Set(db.parts.map(p => p.pkg).filter(Boolean))];
+    return {linked, first: opts[0], hasUsed: used.every(u => opts.includes(u)), hasCommon: opts.includes("SOT-23-5"),
+            dupes: opts.length - new Set(opts.map(o => o.toUpperCase())).size};
+  });
+  check("the package field suggests the bin's own packages first, then the common ones, once each",
+        pl.linked && pl.hasUsed && pl.hasCommon && pl.dupes === 0 && pl.first === "0603", pl);
   const sc = await page.evaluate(() => [
     parseScan("{pbn:PICK2309120041,on:SO2309120012,pc:C25744,pm:0402WGF1002TCE,qty:100,mc:,cc:1,pdi:93118125,hp:0,wc:JS}"),
     parseScan("https://example.github.io/parts-bin-app/inventory.html#box=C7"),
