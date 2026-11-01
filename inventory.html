@@ -2927,6 +2927,20 @@ function pkgTft(){
   for(let i=0;i<7;i++) s += svgCirc(11, 22+i*9, 1.8, PKG_GOLD);
   return s;
 }
+/* 7-segment display: dark face, each digit an "8." with its segments lit */
+function pkgSevenSeg(digits){
+  const n = Math.max(1, Math.min(digits||1, 4)), W = n===1 ? 56 : 88, H = n===1 ? 76 : 52;
+  const x0 = 50-W/2, y0 = 50-H/2, dw = W/n;
+  const on = "#ff3b2f", t = Math.max(3, dw*0.1);
+  let s = svgRect(x0, y0, W, H, "#26272b", 2);
+  for(let i=0;i<n;i++){
+    const w = dw*0.6, h = H*0.72, x = x0+dw*i+dw*0.14, y = y0+H*0.14, hh = h/2;
+    s += svgRect(x+t, y, w-2*t, t, on) + svgRect(x+t, y+hh-t/2, w-2*t, t, on) + svgRect(x+t, y+h-t, w-2*t, t, on) +
+         svgRect(x, y+t, t, hh-1.5*t, on) + svgRect(x+w-t, y+t, t, hh-1.5*t, on) +
+         svgRect(x, y+hh+t/2, t, hh-1.5*t, on) + svgRect(x+w-t, y+hh+t/2, t, hh-1.5*t, on) + svgCirc(x+w+t*1.2, y+h-t/2, t*0.6, on);
+  }
+  return s;
+}
 /* microSD socket: the metal shell, a card part way in, its contacts */
 function pkgSd(){
   let s = svgRect(18,10,64,62,"#c7ccd3",2) + svgRect(24,16,52,4,"#aeb3ba") + svgRect(24,26,52,4,"#aeb3ba");
@@ -2941,14 +2955,22 @@ function pkgSd(){
    of the package, which for these is often just "Plugin" or nothing.      */
 function pkgThing(P, c, H){
   const T = P+" "+H, C = c.toUpperCase();
+  /* a driver chip names the display it drives - it is still a chip */
+  const chip = /DRIVER|CONTROLLER|\bIC\b/.test(C) || /(DISPLAY|SEGMENT|LCD|LED)\s+DRIVER|\bDRIVER\s+IC\b|\bIC\b/.test(T) ||
+               /^(SOIC|SOP|SSOP|TSSOP|MSOP|QFN|QFP|LQFP|TQFP|DFN|SOT|TO-|TQFN)/.test(P);
+  if(!chip && /7[- ]?SEG|SEVEN[- ]?SEG|\bSEGMENT/.test(C+" "+T)){
+    const d = /(\d)\s*-?\s*(?:DIGIT|DIG\b|BIT\b)/.exec(T);
+    return {kind:"7seg", body:pkgSevenSeg(d ? +d[1] : 1)};
+  }
   if(/\bSMA[- ]?(90|KWE|KHD|KE|K|JE|J|RA)\b|\bSMA\b.*(90|RIGHT|CONNECTOR|JACK|FEMALE|MALE|50\s*OHM)/.test(T) ||
      (/\bRF\b|ANTENNA|COAX|CONNECTOR|TERMINAL/.test(C) && /\bSMA\b/.test(T)))
     return {kind:"sma", body:pkgSmaJack(/90|RIGHT|\bRA\b|KWE|KHD/.test(T))};
   if(/POTENTIOM|TRIMPOT|TRIMMER|RHEOSTAT|VARIABLE RESIST/.test(C+" "+T) || /^(3296|3362|3386|3266|RV09|WH148|RK09)/.test(P))
     return {kind:"pot", body:/3296|3362|3386|3266|TRIM|SMD|CERMET/.test(T) ? pkgTrimmer() : pkgPot()};
+  if(chip) return null;
   if(/\bBUZZER|BEEPER|PIEZO|SOUNDER/.test(C+" "+T)) return {kind:"buzzer", body:pkgBuzzer()};
   if(/MICRO\s*SD|\bTF[- ]?(CARD|SOCKET)|\bSD[- ]?CARD|\bSD\s*SOCKET/.test(C+" "+T)) return {kind:"sd", body:pkgSd()};
-  if(/\bLCD|OLED|\bTFT|\bHMI\b|GLCD|DISPLAY/.test(C+" "+T) && !/DRIVER/.test(C)){
+  if(/\bLCD|OLED|\bTFT|\bHMI\b|GLCD|DISPLAY/.test(C+" "+T)){
     if(/16\s*X\s*2|20\s*X\s*4|1602|2004|CHARACTER|HD44780/.test(T)) return {kind:"display", body:pkgCharLcd()};
     if(/OLED|SSD13|SH110/.test(T)) return {kind:"display", body:pkgOled()};
     return {kind:"display", body:pkgTft()};

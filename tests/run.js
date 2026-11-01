@@ -373,10 +373,11 @@ function writeY4m(file, rows){
     ["P=2.54mm","Terminal","BOX HEADER 10PIN(2x5) 2.54mm"],["SMD","BATTERY HOLDER","BH201 CR2032 METAL BULK"],
     ["PCB","Battery","AAA SIZE 1.2V NI-MH"],["","Battery","Li-ion 3.7V 500mAh"],["Plugin","Buzzer","TMB12A03"],
     ["","Modules","LCD 16X2 with I2C Driver"],["Plugin","LCD HMI","2.4 IPS TFT SPI"],["","Modules","SD-Card Adapter"],
-    ["TQFN-16","Battery Management","TP5100 2A 1-2CELL Battery Charger"],["SOIC-24_300mil","LED Display Drivers","MAX7219"]]
+    ["TQFN-16","Battery Management","TP5100 2A 1-2CELL Battery Charger"],["SOIC-24_300mil","LED Display Drivers","MAX7219CWG+T LED Display Drivers"],
+    ["","LED","5161AS 7-Segment LED Display 1 digit"],["DIP-12","Modules","4 Digit 7 Segment Display"],["","Modules","TM1637 7-segment driver IC"]]
     .map(([p, c, h]) => (pkgShape(p, c, h) || {kind: "-"}).kind));
   check("jacks, pots, headers, batteries, buzzers, displays and SD sockets are known by name; an IC that only mentions them stays an IC",
-        things.join() === "sma,diode,pot,header,battery,battery,battery,buzzer,display,display,sd,quad,dual", things);
+        things.join() === "sma,diode,pot,header,battery,battery,battery,buzzer,display,display,sd,quad,dual,7seg,7seg,-", things);
   check("a part with no picture shows its package drawn, one with an unreadable package keeps the name",
         pk.drawn && pk.plain, pk);
   check("the editor previews the drawing when the picture field is empty", pk.shown, pk);
