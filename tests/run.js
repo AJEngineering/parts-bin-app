@@ -348,6 +348,50 @@ function writeY4m(file, rows){
         /^images\/P\w+\.(webp|jpg)$/.test(own.picked) && own.size === "256x256" && own.prev, own);
   check("a picture pasted into the field is saved the same way and queued for the repository",
         /^images\/P\w+\.(webp|jpg)$/.test(own.pasted) && own.pasted !== own.picked && own.queued, own);
+  const pk = await page.evaluate(() => {
+    const kinds = [["0603","Resistors"],["603","Capacitors"],["CASE-A_3216","Capacitors"],["SOD-123",""],["SMA",""],
+      ["SOT-23",""],["SOT-23-5",""],["SOT-223",""],["SOIC-8",""],["TSSOP-20",""],["DIP-8",""],["LQFP-48(7x7)",""],
+      ["QFN-32",""],["TO-220AB",""],["TO-252-2",""],["SMD,6.3x7.7mm","Capacitors"],["SMD,6.6x7.0mm","Inductors"],
+      ["SMD3225-4P","Crystals"],["5.08MM","Terminal"],["LED 3MM","LED"],["Plugin","Resistors"],["SMD",""],["",""]]
+      .map(([p, c]) => (pkgShape(p, c) || {kind: "-"}).kind);
+    const legs = (pkgSvg("SOIC-8", "").match(/<rect/g) || []).length;
+    const p = db.parts.find(x => x.pkg === "0603"), q = db.parts.find(x => x.pkg && !pkgShape(x.pkg, x.cat));
+    const pi = p.img, qi = q && q.img; p.img = ""; if (q) q.img = "";
+    ui.view = "parts"; ui.box = ""; ui.cat = ""; ui.q = ""; render();
+    const drawn = !!document.querySelector('.row[data-id="' + p.id + '"] .thumb.drawn svg[data-kind="chip"]');
+    const plain = q ? document.querySelector('.row[data-id="' + q.id + '"] .thumb.none').textContent === q.pkg : true;
+    openEditor(p);
+    const prev = document.getElementById("imgPrev"), shown = !prev.hidden && /^data:image\/svg\+xml/.test(prev.src);
+    closeEditor(); p.img = pi; if (q) q.img = qi; render();
+    return {kinds, legs, drawn, plain, shown};
+  });
+  check("each package family is recognised from its name, and a bare SMD is left alone",
+        pk.kinds.join() === "chip,chip,tantalum,diode,diode,sot,sot,sot,dual,dual,dual,quad,quad,to,to,can,inductor,crystal,terminal,led,axial,-,-", pk.kinds);
+  check("an SOIC-8 is drawn with eight legs and a body", pk.legs === 9, pk.legs);
+  const things = await page.evaluate(() => [
+    ["","Terminal","SMA 90° 50 ohms"],["SMA","Diodes","SS14 40V"],["SMD","Potentiometers","VG039 Variable Resistors/Potentiometers"],
+    ["P=2.54mm","Terminal","BOX HEADER 10PIN(2x5) 2.54mm"],["SMD","BATTERY HOLDER","BH201 CR2032 METAL BULK"],
+    ["PCB","Battery","AAA SIZE 1.2V NI-MH"],["","Battery","Li-ion 3.7V 500mAh"],["Plugin","Buzzer","TMB12A03"],
+    ["","Modules","LCD 16X2 with I2C Driver"],["Plugin","LCD HMI","2.4 IPS TFT SPI"],["","Modules","SD-Card Adapter"],
+    ["TQFN-16","Battery Management","TP5100 2A 1-2CELL Battery Charger"],["SOIC-24_300mil","LED Display Drivers","MAX7219CWG+T LED Display Drivers"],
+    ["","LED","5161AS 7-Segment LED Display 1 digit"],["DIP-12","Modules","4 Digit 7 Segment Display"],["","Modules","TM1637 7-segment driver IC"]]
+    .map(([p, c, h]) => (pkgShape(p, c, h) || {kind: "-"}).kind));
+  check("jacks, pots, headers, batteries, buzzers, displays and SD sockets are known by name; an IC that only mentions them stays an IC",
+        things.join() === "sma,diode,pot,header,battery,battery,battery,buzzer,display,display,sd,quad,dual,7seg,7seg,-", things);
+  check("a part with no picture shows its package drawn, one with an unreadable package keeps the name",
+        pk.drawn && pk.plain, pk);
+  check("the editor previews the drawing when the picture field is empty", pk.shown, pk);
+  const pl = await page.evaluate(() => {
+    openEditor(findPart(1));
+    const opts = [...document.querySelectorAll("#pkgList option")].map(o => o.value);
+    const linked = document.getElementById("sheet").elements.pkg.getAttribute("list") === "pkgList";
+    closeEditor();
+    const used = [...new Set(db.parts.map(p => p.pkg).filter(Boolean))];
+    return {linked, first: opts[0], hasUsed: used.every(u => opts.includes(u)), hasCommon: opts.includes("SOT-23-5"),
+            dupes: opts.length - new Set(opts.map(o => o.toUpperCase())).size};
+  });
+  check("the package field suggests the bin's own packages first, then the common ones, once each",
+        pl.linked && pl.hasUsed && pl.hasCommon && pl.dupes === 0 && pl.first === "0603", pl);
   const sc = await page.evaluate(() => [
     parseScan("{pbn:PICK2309120041,on:SO2309120012,pc:C25744,pm:0402WGF1002TCE,qty:100,mc:,cc:1,pdi:93118125,hp:0,wc:JS}"),
     parseScan("https://example.github.io/parts-bin-app/inventory.html#box=C7"),
